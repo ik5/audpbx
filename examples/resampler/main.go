@@ -59,8 +59,8 @@ func main() {
     for {
         n, err := mono.ReadSamples(buf)
         if n > 0 {
-            for i := 0; i < n; i++ {
-                pcm16 = append(pcm16, audio.Float32ToInt16(buf[i]))
+            for i := range n {
+                pcm16 = append(pcm16, utils.Float32ToInt16(buf[i]))
             }
         }
         if err == io.EOF {
@@ -78,7 +78,7 @@ func main() {
     }
     defer outFile.Close()
 
-    if err := utils.WriteWAV16(outFile, 8000, pcm16); err != nil {
+    if err := wav.WriteWAV16(outFile, 8000, pcm16); err != nil {
         panic(err)
     }
 
