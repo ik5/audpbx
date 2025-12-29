@@ -19,6 +19,7 @@ type source struct {
 func (s *source) SampleRate() int { return s.sampleRate }
 func (s *source) Channels() int   { return s.channels }
 func (s *source) Close() error    { return nil }
+func (s *source) BufSize() int { return cap(s.tmp) }
 
 func (s *source) ReadSamples(dst []float32) (int, error) {
     frames := len(dst) / s.channels

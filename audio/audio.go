@@ -13,6 +13,9 @@ type Source interface {
     // ReadSamples fills dst with interleaved float32 samples in [-1,1].
     // Returns number of float32 values written (not frames). When n == 0 with err == io.EOF, the stream is finished.
     ReadSamples(dst []float32) (n int, err error)
+
+    BufSize() int
+
     // Close releases any resources.
     Close() error
 }

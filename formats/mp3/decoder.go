@@ -18,6 +18,7 @@ type source struct {
 func (s *source) SampleRate() int { return s.sampleRate }
 func (s *source) Channels() int   { return s.channels }
 func (s *source) Close() error    { return nil }
+func (s *source) BufSize() int { return cap(s.buf) }
 
 func (s *source) ReadSamples(dst []float32) (int, error) {
     // go-mp3 returns 16-bit little-endian PCM bytes (stereo).

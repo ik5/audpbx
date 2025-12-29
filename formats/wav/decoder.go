@@ -9,7 +9,7 @@ import (
 	"github.com/ik5/audpbx/audio"
 )
 
-type wavSource struct {
+type source struct {
     r          io.Reader
     sampleRate int
     channels   int
@@ -18,11 +18,12 @@ type wavSource struct {
     tmp        []float32
 }
 
-func (s *wavSource) SampleRate() int { return s.sampleRate }
-func (s *wavSource) Channels() int   { return s.channels }
-func (s *wavSource) Close() error    { return nil }
+func (s *source) SampleRate() int { return s.sampleRate }
+func (s *source) Channels() int   { return s.channels }
+func (s *source) Close() error    { return nil }
+func (s *source) BufSize() int { return cap(s.buf) }
 
-func (s *wavSource) ReadSamples(dst []float32) (int, error) {
+func (s *source) ReadSamples(dst []float32) (int, error) {
     // Read frames of int16 interleaved, convert to float32
     if len(s.buf) < len(dst)*2 {
         s.buf = make([]byte, len(dst)*2)
@@ -85,7 +86,7 @@ func (Decoder) Decode(r io.Reader) (audio.Source, error) {
         return nil, ErrUnsupportedWavChunks
     }
 
-    return &wavSource{
+    return &source{
         r:          r,
         sampleRate: sampleRate,
         channels:   channels,
