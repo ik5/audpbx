@@ -38,6 +38,7 @@ func NewResampler(src Source, dstRate int) *Resampler {
 
 func (r *Resampler) SampleRate() int  { return int(r.dstRate) }
 func (r *Resampler) Channels() int    { return r.channels }
+func (r *Resampler) BufSize() int { return r.src.BufSize() }
 
 func (r *Resampler) Close() error     {
 	err := r.src.Close()
