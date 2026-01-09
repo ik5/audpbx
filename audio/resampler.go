@@ -91,6 +91,7 @@ func (r *Resampler) ReadSamples(dst []float32) (int, error) {
                     return written, fmt.Errorf("%w", err)
                 }
             }
+
             r.inFrame = r.inFrame[:n]
             if len(r.inFrame) == 0 {
                 // No more data
