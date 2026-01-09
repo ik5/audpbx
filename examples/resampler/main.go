@@ -55,7 +55,11 @@ func main() {
 
     // Stream and collect int16 samples
     var pcm16 []int16
-    buf := make([]float32, 4096) // mono buffer
+
+    bufSize := res.BufSize()
+
+    var buf = make([]float32, bufSize) // mono buffer
+
     for {
         n, err := mono.ReadSamples(buf)
         if n > 0 {
