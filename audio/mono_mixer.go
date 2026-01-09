@@ -25,6 +25,10 @@ func (m *MonoMixer) Close() error    {
 	return nil
 }
 
+func (m *MonoMixer) BufSize() int {
+	return 4096
+}
+
 func (m *MonoMixer) ReadSamples(dst []float32) (int, error) {
     if len(dst) == 0 {
         return 0, nil
