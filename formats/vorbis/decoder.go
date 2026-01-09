@@ -9,46 +9,61 @@ import (
 )
 
 type source struct {
-    dec        *oggvorbis.Reader
-    sampleRate int
-    channels   int
-    // working buffer in float32 frames
-    tmp []float32
+	dec        *oggvorbis.Reader
+	sampleRate int
+	channels   int
+	frameBuf   []float32 // buffer for reading frames from decoder
 }
 
 func (s *source) SampleRate() int { return s.sampleRate }
 func (s *source) Channels() int   { return s.channels }
 func (s *source) Close() error    { return nil }
-func (s *source) BufSize() int { return cap(s.tmp) }
+func (s *source) BufSize() int    { return cap(s.frameBuf) }
 
 func (s *source) ReadSamples(dst []float32) (int, error) {
-    frames := len(dst) / s.channels
-    if frames == 0 {
-        return 0, nil
-    }
-    if len(s.tmp) < frames*s.channels {
-        s.tmp = make([]float32, frames*s.channels)
-    }
-    n, err := s.dec.Read(s.tmp)
-    if n == 0 && err != nil {
-        return 0, fmt.Errorf("%w", err)
-    }
-    // Copy as float32
-    copy(dst[:n*s.channels], s.tmp[:n*s.channels])
-    return n * s.channels, err
+	if len(dst) == 0 {
+		return 0, nil
+	}
+
+	// oggvorbis.Reader.Read() expects a buffer sized in frames (not samples)
+	// and returns the number of frames read
+	framesRequested := len(dst) / s.channels
+
+	// Ensure our frame buffer is large enough
+	if cap(s.frameBuf) < framesRequested*s.channels {
+		s.frameBuf = make([]float32, framesRequested*s.channels)
+	}
+	s.frameBuf = s.frameBuf[:framesRequested*s.channels]
+
+	// Read frames from decoder
+	// The oggvorbis library's Read method takes a []float32 and returns frames read
+	framesRead, err := s.dec.Read(s.frameBuf)
+	if framesRead == 0 {
+		if err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+
+	// Copy the interleaved samples to dst
+	samplesRead := framesRead * s.channels
+	copy(dst, s.frameBuf[:samplesRead])
+
+	return samplesRead, err
 }
 
 type Decoder struct{}
 
 func (Decoder) Decode(r io.Reader) (audio.Source, error) {
-    dec, err := oggvorbis.NewReader(r)
-    if err != nil {
-        return nil, err
-    }
-    return &source{
-        dec:        dec,
-        sampleRate: dec.SampleRate(),
-        channels:   dec.Channels(),
-        tmp:        make([]float32, 4096),
-    }, nil
+	dec, err := oggvorbis.NewReader(r)
+	if err != nil {
+		return nil, fmt.Errorf("%w", err)
+	}
+
+	return &source{
+		dec:        dec,
+		sampleRate: dec.SampleRate(),
+		channels:   dec.Channels(),
+		frameBuf:   make([]float32, 4096),
+	}, nil
 }

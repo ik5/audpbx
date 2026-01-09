@@ -16,6 +16,7 @@ func NewMonoMixer(src Source) *MonoMixer {
 
 func (m *MonoMixer) SampleRate() int { return m.src.SampleRate() }
 func (m *MonoMixer) Channels() int   { return 1 }
+func (m *MonoMixer) BufSize() int    { return m.src.BufSize() }
 func (m *MonoMixer) Close() error    {
 	err := m.src.Close()
 	if err != nil {
@@ -23,10 +24,6 @@ func (m *MonoMixer) Close() error    {
 	}
 
 	return nil
-}
-
-func (m *MonoMixer) BufSize() int {
-	return 4096
 }
 
 func (m *MonoMixer) ReadSamples(dst []float32) (int, error) {

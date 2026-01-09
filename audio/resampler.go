@@ -1,48 +1,87 @@
 package audio
 
 import (
-	"errors"
 	"fmt"
 	"io"
-	"math"
 )
 
 // Resampler streams from src to target sample rate using linear interpolation.
 // Works on interleaved samples; preserves channel count.
 type Resampler struct {
-    src          Source
-    srcRate      float64
-    dstRate      float64
-    ratio        float64
-    channels     int
-    // fractional position in source (in frames)
-    pos          float64
-    // small ring buffer per channel: previous and next samples
-    // We keep two frames worth (prev,next) = 2*channels values.
-    buf          []float32
-    // internal frame buffer pulled from src
-    inFrame      []float32
+	src      Source
+	srcRate  float64
+	dstRate  float64
+	ratio    float64 // srcRate / dstRate - how many source samples per output sample
+	channels int
+
+	// Ring buffer holding previous and current frame for interpolation
+	prevFrame []float32 // previous frame (channels samples)
+	currFrame []float32 // current frame (channels samples)
+	hasPrev   bool      // whether prevFrame is valid
+	hasCurr   bool      // whether currFrame is valid
+
+	// Position within the current output stream (in source samples)
+	pos float64
+
+	// Buffer for reading from source
+	srcBuf []float32
+	eof    bool
 }
 
 func NewResampler(src Source, dstRate int) *Resampler {
-    return &Resampler{
-        src:      src,
-        srcRate:  float64(src.SampleRate()),
-        dstRate:  float64(dstRate),
-        ratio:    float64(src.SampleRate()) / float64(dstRate),
-        channels: src.Channels(),
-        buf:      make([]float32, 2*src.Channels()),
-        inFrame:  make([]float32, 4096), // multiple of channels
-    }
+	channels := src.Channels()
+	return &Resampler{
+		src:       src,
+		srcRate:   float64(src.SampleRate()),
+		dstRate:   float64(dstRate),
+		ratio:     float64(src.SampleRate()) / float64(dstRate),
+		channels:  channels,
+		prevFrame: make([]float32, channels),
+		currFrame: make([]float32, channels),
+		srcBuf:    make([]float32, 4096),
+		pos:       0,
+	}
 }
 
-func (r *Resampler) SampleRate() int  { return int(r.dstRate) }
-func (r *Resampler) Channels() int    { return r.channels }
-func (r *Resampler) BufSize() int { return r.src.BufSize() }
+func (r *Resampler) SampleRate() int { return int(r.dstRate) }
+func (r *Resampler) Channels() int   { return r.channels }
+func (r *Resampler) BufSize() int    { return r.src.BufSize() }
 
-func (r *Resampler) Close() error     {
+func (r *Resampler) Close() error {
 	err := r.src.Close()
 	if err != nil {
+		return fmt.Errorf("%w", err)
+	}
+	return nil
+}
+
+// fetchNextFrame reads the next frame from source into currFrame
+func (r *Resampler) fetchNextFrame() error {
+	if r.eof {
+		return io.EOF
+	}
+
+	// Shift current to previous
+	if r.hasCurr {
+		copy(r.prevFrame, r.currFrame)
+		r.hasPrev = true
+	}
+
+	// Try to read one frame
+	n, err := r.src.ReadSamples(r.srcBuf[:r.channels])
+	if n > 0 {
+		copy(r.currFrame, r.srcBuf[:n])
+		r.hasCurr = true
+	} else {
+		r.hasCurr = false
+	}
+
+	if err == io.EOF {
+		r.eof = true
+		if !r.hasCurr {
+			return io.EOF
+		}
+	} else if err != nil {
 		return fmt.Errorf("%w", err)
 	}
 
@@ -52,88 +91,57 @@ func (r *Resampler) Close() error     {
 // ReadSamples produces dst samples at r.dstRate.
 // dst length should be a multiple of r.channels.
 func (r *Resampler) ReadSamples(dst []float32) (int, error) {
-    if len(dst)%r.channels != 0 {
-        return 0, ErrInvalidDstSize
-    }
+	if len(dst)%r.channels != 0 {
+		return 0, ErrInvalidDstSize
+	}
 
-    // Ensure we have an initial frame for interpolation
-    if r.pos == 0 {
-        // Fill buf with first two frames (or duplicates if not enough)
-        if err := r.fillInitialBuffer(); err != nil {
-            if errors.Is(err, io.EOF) {
-                return 0, io.EOF
-            }
-            return 0, fmt.Errorf("%w", err)
-        }
-    }
+	// Initialize if needed
+	if !r.hasCurr {
+		if err := r.fetchNextFrame(); err != nil {
+			return 0, err
+		}
+	}
 
-    written := 0
-    dstFrames := len(dst) / r.channels
+	written := 0
+	framesNeeded := len(dst) / r.channels
 
-    for written < len(dst) {
-        // Need to ensure we can interpolate at current pos:
-        // pos is fractional frame index; floor gives current frame,
-        // we need the following frame available too.
-        for math.Floor(r.pos)+1 >= float64(len(r.inFrame)/r.channels) {
-            // Shift pos down while we fetch more source data.
-            r.pos -= float64(len(r.inFrame) / r.channels)
-            // Pull more source data
-            n, err := r.src.ReadSamples(r.inFrame[:cap(r.inFrame)])
-            if n == 0 {
-                if errors.Is(err, io.EOF) {
-                    // If we cannot produce more, finalize
-                    if written == 0 {
-                        return 0, io.EOF
-                    }
-                    return written, nil
-                }
-                if err != nil {
-                    return written, fmt.Errorf("%w", err)
-                }
-            }
+	for written < framesNeeded {
+		// Ensure we have current and next frame for interpolation
+		// pos is in terms of source frame index
+		// When pos >= 1.0, we need to advance to the next frame
+		for r.pos >= 1.0 {
+			r.pos -= 1.0
+			if err := r.fetchNextFrame(); err != nil {
+				if err == io.EOF && written > 0 {
+					return written * r.channels, nil
+				}
+				return written * r.channels, err
+			}
+		}
 
-            r.inFrame = r.inFrame[:n]
-            if len(r.inFrame) == 0 {
-                // No more data
-                if written == 0 {
-                    return 0, io.EOF
-                }
-                return written, nil
-            }
-        }
+		// Now interpolate between prevFrame and currFrame
+		// If we don't have a previous frame, use current for both
+		var frame0, frame1 []float32
+		if r.hasPrev {
+			frame0 = r.prevFrame
+			frame1 = r.currFrame
+		} else {
+			// First frame - duplicate current
+			frame0 = r.currFrame
+			frame1 = r.currFrame
+		}
 
-        // Interpolate one output frame
-        srcFrameIndex := int(math.Floor(r.pos))
-        alpha := float32(r.pos - float64(srcFrameIndex))
-        for c := 0; c < r.channels; c++ {
-            i0 := (srcFrameIndex*r.channels + c)
-            i1 := i0 + r.channels
-            s0 := r.inFrame[i0]
-            // Guard for last frame: repeat s0 if i1 out of bounds
-            var s1 float32
-            if i1 < len(r.inFrame) {
-                s1 = r.inFrame[i1]
-            } else {
-                s1 = s0
-            }
-            out := s0 + alpha*(s1-s0)
-            dst[written+c] = out
-        }
-        written += r.channels
-        r.pos += r.ratio
-        if written/r.channels >= dstFrames {
-            break
-        }
-    }
-    return written, nil
-}
+		// Linear interpolation
+		alpha := float32(r.pos)
+		for c := 0; c < r.channels; c++ {
+			s0 := frame0[c]
+			s1 := frame1[c]
+			dst[written*r.channels+c] = s0 + alpha*(s1-s0)
+		}
 
-func (r *Resampler) fillInitialBuffer() error {
-    // Prime internal buffer with some source data
-    n, err := r.src.ReadSamples(r.inFrame[:cap(r.inFrame)])
-    if n == 0 && err != nil {
-        return fmt.Errorf("%w",err)
-    }
-    r.inFrame = r.inFrame[:n]
-    return nil
+		written++
+		r.pos += r.ratio
+	}
+
+	return written * r.channels, nil
 }
