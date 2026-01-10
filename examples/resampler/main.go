@@ -56,9 +56,9 @@ func main() {
     // Stream and collect int16 samples
     var pcm16 []int16
 
-    bufSize := res.BufSize()
-
-    var buf = make([]float32, bufSize) // mono buffer
+    // Use a reasonable buffer size for mono output at 8kHz
+    // 4096 samples = ~512ms of audio at 8kHz
+    var buf = make([]float32, 4096)
 
     for {
         n, err := mono.ReadSamples(buf)
