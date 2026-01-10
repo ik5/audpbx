@@ -3,10 +3,13 @@ package audio
 import (
 	"fmt"
 	"io"
+
+	"github.com/ik5/audpbx/utils"
 )
 
-// Resampler streams from src to target sample rate using linear interpolation.
+// Resampler streams from src to target sample rate using cubic interpolation.
 // Works on interleaved samples; preserves channel count.
+// Includes basic anti-aliasing filtering when downsampling.
 type Resampler struct {
 	src      Source
 	srcRate  float64
@@ -14,11 +17,10 @@ type Resampler struct {
 	ratio    float64 // srcRate / dstRate - how many source samples per output sample
 	channels int
 
-	// Ring buffer holding previous and current frame for interpolation
-	prevFrame []float32 // previous frame (channels samples)
-	currFrame []float32 // current frame (channels samples)
-	hasPrev   bool      // whether prevFrame is valid
-	hasCurr   bool      // whether currFrame is valid
+	// Ring buffer holding 4 frames for cubic interpolation
+	// frames[0] = t-1, frames[1] = t0, frames[2] = t+1, frames[3] = t+2
+	frames   [4][]float32
+	hasFrame [4]bool
 
 	// Position within the current output stream (in source samples)
 	pos float64
@@ -26,21 +28,46 @@ type Resampler struct {
 	// Buffer for reading from source
 	srcBuf []float32
 	eof    bool
+
+	// Simple low-pass filter state for anti-aliasing (when downsampling)
+	filterState []float32
+	useFilter   bool
+	filterAlpha float32
 }
 
 func NewResampler(src Source, dstRate int) *Resampler {
 	channels := src.Channels()
-	return &Resampler{
-		src:       src,
-		srcRate:   float64(src.SampleRate()),
-		dstRate:   float64(dstRate),
-		ratio:     float64(src.SampleRate()) / float64(dstRate),
-		channels:  channels,
-		prevFrame: make([]float32, channels),
-		currFrame: make([]float32, channels),
-		srcBuf:    make([]float32, 4096),
-		pos:       0,
+	ratio := float64(src.SampleRate()) / float64(dstRate)
+
+	// Enable simple low-pass filter when downsampling
+	useFilter := ratio > 1.0
+	var filterAlpha float32
+	if useFilter {
+		// Simple one-pole low-pass filter
+		// Cutoff at Nyquist frequency of destination rate
+		// This is a simplified filter - for production, use a proper FIR filter
+		filterAlpha = 0.5
 	}
+
+	r := &Resampler{
+		src:         src,
+		srcRate:     float64(src.SampleRate()),
+		dstRate:     float64(dstRate),
+		ratio:       ratio,
+		channels:    channels,
+		srcBuf:      make([]float32, 4096),
+		pos:         0,
+		useFilter:   useFilter,
+		filterAlpha: filterAlpha,
+		filterState: make([]float32, channels),
+	}
+
+	// Initialize frame buffers
+	for i := range r.frames {
+		r.frames[i] = make([]float32, channels)
+	}
+
+	return r
 }
 
 func (r *Resampler) SampleRate() int { return int(r.dstRate) }
@@ -55,30 +82,41 @@ func (r *Resampler) Close() error {
 	return nil
 }
 
-// fetchNextFrame reads the next frame from source into currFrame
+// fetchNextFrame reads the next frame from source and shifts the frame buffer
 func (r *Resampler) fetchNextFrame() error {
 	if r.eof {
 		return io.EOF
 	}
 
-	// Shift current to previous
-	if r.hasCurr {
-		copy(r.prevFrame, r.currFrame)
-		r.hasPrev = true
-	}
+	// Shift frames: [0,1,2,3] -> [1,2,3,?]
+	copy(r.frames[0], r.frames[1])
+	copy(r.frames[1], r.frames[2])
+	copy(r.frames[2], r.frames[3])
+	r.hasFrame[0] = r.hasFrame[1]
+	r.hasFrame[1] = r.hasFrame[2]
+	r.hasFrame[2] = r.hasFrame[3]
 
-	// Try to read one frame
+	// Try to read one frame into frames[3]
 	n, err := r.src.ReadSamples(r.srcBuf[:r.channels])
 	if n > 0 {
-		copy(r.currFrame, r.srcBuf[:n])
-		r.hasCurr = true
+		copy(r.frames[3], r.srcBuf[:n])
+		r.hasFrame[3] = true
+
+		// Apply simple low-pass filter if downsampling
+		if r.useFilter {
+			for c := 0; c < r.channels; c++ {
+				// One-pole low-pass: y[n] = alpha * x[n] + (1-alpha) * y[n-1]
+				r.frames[3][c] = r.filterAlpha*r.frames[3][c] + (1-r.filterAlpha)*r.filterState[c]
+				r.filterState[c] = r.frames[3][c]
+			}
+		}
 	} else {
-		r.hasCurr = false
+		r.hasFrame[3] = false
 	}
 
 	if err == io.EOF {
 		r.eof = true
-		if !r.hasCurr {
+		if !r.hasFrame[3] {
 			return io.EOF
 		}
 	} else if err != nil {
@@ -95,10 +133,31 @@ func (r *Resampler) ReadSamples(dst []float32) (int, error) {
 		return 0, ErrInvalidDstSize
 	}
 
-	// Initialize if needed
-	if !r.hasCurr {
-		if err := r.fetchNextFrame(); err != nil {
-			return 0, err
+	// Initialize frame buffer if needed
+	if !r.hasFrame[1] {
+		// Fill initial frames
+		for i := 0; i < 4; i++ {
+			n, err := r.src.ReadSamples(r.srcBuf[:r.channels])
+			if n > 0 {
+				copy(r.frames[i], r.srcBuf[:n])
+				r.hasFrame[i] = true
+			}
+			if err == io.EOF {
+				r.eof = true
+				if i == 0 {
+					return 0, io.EOF
+				}
+				// Duplicate last valid frame for remaining slots
+				for j := i; j < 4; j++ {
+					if i > 0 {
+						copy(r.frames[j], r.frames[i-1])
+						r.hasFrame[j] = true
+					}
+				}
+				break
+			} else if err != nil {
+				return 0, fmt.Errorf("%w", err)
+			}
 		}
 	}
 
@@ -106,9 +165,8 @@ func (r *Resampler) ReadSamples(dst []float32) (int, error) {
 	framesNeeded := len(dst) / r.channels
 
 	for written < framesNeeded {
-		// Ensure we have current and next frame for interpolation
-		// pos is in terms of source frame index
-		// When pos >= 1.0, we need to advance to the next frame
+		// Ensure we have frames for interpolation
+		// pos should be in range [0, 1) for interpolation between frames[1] and frames[2]
 		for r.pos >= 1.0 {
 			r.pos -= 1.0
 			if err := r.fetchNextFrame(); err != nil {
@@ -119,24 +177,38 @@ func (r *Resampler) ReadSamples(dst []float32) (int, error) {
 			}
 		}
 
-		// Now interpolate between prevFrame and currFrame
-		// If we don't have a previous frame, use current for both
-		var frame0, frame1 []float32
-		if r.hasPrev {
-			frame0 = r.prevFrame
-			frame1 = r.currFrame
-		} else {
-			// First frame - duplicate current
-			frame0 = r.currFrame
-			frame1 = r.currFrame
+		// Check if we have enough frames for cubic interpolation
+		if !r.hasFrame[1] || !r.hasFrame[2] {
+			// Not enough data
+			if written == 0 {
+				return 0, io.EOF
+			}
+			return written * r.channels, nil
 		}
 
-		// Linear interpolation
+		// Cubic interpolation between frames
 		alpha := float32(r.pos)
+
 		for c := 0; c < r.channels; c++ {
-			s0 := frame0[c]
-			s1 := frame1[c]
-			dst[written*r.channels+c] = s0 + alpha*(s1-s0)
+			var y0, y1, y2, y3 float32
+
+			// Use available frames, duplicate edge frames if needed
+			if r.hasFrame[0] {
+				y0 = r.frames[0][c]
+			} else {
+				y0 = r.frames[1][c]
+			}
+
+			y1 = r.frames[1][c]
+			y2 = r.frames[2][c]
+
+			if r.hasFrame[3] {
+				y3 = r.frames[3][c]
+			} else {
+				y3 = r.frames[2][c]
+			}
+
+			dst[written*r.channels+c] = utils.CubicInterpolate(y0, y1, y2, y3, alpha)
 		}
 
 		written++
