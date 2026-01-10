@@ -6,6 +6,8 @@ import (
 )
 
 func TestCubicInterpolate(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name           string
 		y0, y1, y2, y3 float32
@@ -87,8 +89,11 @@ func TestCubicInterpolate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			got := CubicInterpolate(tt.y0, tt.y1, tt.y2, tt.y3, tt.x)
 			diff := float32(math.Abs(float64(got - tt.want)))
+
 			if diff > tt.tolerance {
 				t.Errorf("CubicInterpolate() = %v, want %v (tolerance %v, diff %v)",
 					got, tt.want, tt.tolerance, diff)
@@ -99,10 +104,13 @@ func TestCubicInterpolate(t *testing.T) {
 
 // TestCubicInterpolateBounds verifies behavior at boundaries
 func TestCubicInterpolateBounds(t *testing.T) {
+	t.Parallel()
+
 	// Test that x=0 always returns y1
 	for i := range 100 {
 		y0, y1, y2, y3 := float32(i), float32(i+1), float32(i+2), float32(i+3)
 		result := CubicInterpolate(y0, y1, y2, y3, 0.0)
+
 		if result != y1 {
 			t.Errorf("x=0 should return y1=%v, got %v", y1, result)
 		}
@@ -120,11 +128,14 @@ func TestCubicInterpolateBounds(t *testing.T) {
 
 // TestCubicInterpolateMonotonic tests that monotonic input produces reasonable output
 func TestCubicInterpolateMonotonic(t *testing.T) {
+	t.Parallel()
+
 	// For monotonically increasing values, result should be between y1 and y2
 	y0, y1, y2, y3 := float32(1.0), float32(2.0), float32(3.0), float32(4.0)
 
 	for x := float32(0.0); x <= 1.0; x += 0.1 {
 		result := CubicInterpolate(y0, y1, y2, y3, x)
+
 		if result < y1-0.5 || result > y2+0.5 {
 			t.Errorf("x=%v: result %v outside reasonable range [%v, %v]",
 				x, result, y1-0.5, y2+0.5)
@@ -141,7 +152,7 @@ func BenchmarkCubicInterpolate(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := range b.N {
+	for range b.N {
 		result = CubicInterpolate(y0, y1, y2, y3, x)
 	}
 
@@ -159,7 +170,7 @@ func BenchmarkCubicInterpolateRealistic(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := range b.N {
+	for range b.N {
 		for j := range samples {
 			// Vary x slightly to prevent constant folding
 			x := float32(j%100) / 100.0
