@@ -22,6 +22,8 @@ func (s *source) Close() error    { return nil }
 func (s *source) BufSize() int    { return cap(s.buf) / 2 } // return sample capacity
 
 func (s *source) ReadSamples(dst []float32) (int, error) {
+	const maxInt16 float32 = 32768.0 // 2^15 -> +32767
+
 	if len(dst) == 0 {
 		return 0, nil
 	}
@@ -52,9 +54,12 @@ func (s *source) ReadSamples(dst []float32) (int, error) {
 
 	// Convert bytes to samples
 	samples := n / 2
+
+	var val int16
+
 	for i := 0; i < samples; i++ {
-		val := int16(binary.LittleEndian.Uint16(s.buf[2*i : 2*i+2]))
-		dst[i] = float32(val) / 32768.0
+		val = int16(binary.LittleEndian.Uint16(s.buf[2*i : 2*i+2]))
+		dst[i] = float32(val) / maxInt16
 	}
 
 	// Return EOF only if we got no samples
@@ -73,43 +78,106 @@ func (s *source) ReadSamples(dst []float32) (int, error) {
 type Decoder struct{}
 
 func (Decoder) Decode(r io.Reader) (audio.Source, error) {
-	// Minimal WAV header parse: RIFF/WAVE + fmt/data chunks
-	header := make([]byte, 44)
-
-	if _, err := io.ReadFull(r, header); err != nil {
-		return nil, fmt.Errorf("%w", err)
+	// Read RIFF header
+	riffHeader := make([]byte, 12)
+	if _, err := io.ReadFull(r, riffHeader); err != nil {
+		return nil, fmt.Errorf("reading RIFF header: %w", err)
 	}
 
-	if !bytes.HasPrefix(header[:4], []byte("RIFF")) || !bytes.HasPrefix(header[8:12], []byte("WAVE")) {
+	if !bytes.HasPrefix(riffHeader[:4], []byte("RIFF")) {
 		return nil, ErrNotWavFile
 	}
 
-	// Parse fmt chunk at offset 12
-	if !bytes.HasPrefix(header[12:16], []byte("fmt ")) {
+	if !bytes.HasPrefix(riffHeader[8:12], []byte("WAVE")) {
+		return nil, ErrNotWavFile
+	}
+
+	var sampleRate, channels, bitsPerSample int
+	var foundFmt, foundData bool
+	var chunkID string
+	var chunkSize uint32
+
+	chunkHeader := make([]byte, 8)
+
+
+	// Parse chunks until we find both fmt and data
+	for {
+		// Read chunk header (4 bytes ID + 4 bytes size)
+		if _, err := io.ReadFull(r, chunkHeader); err != nil {
+			if err == io.EOF && foundFmt && foundData {
+				break
+			}
+			return nil, fmt.Errorf("reading chunk header: %w", err)
+		}
+
+		chunkID = string(chunkHeader[0:4])
+		chunkSize = binary.LittleEndian.Uint32(chunkHeader[4:8])
+
+		switch chunkID {
+		case "fmt ":
+			if chunkSize < 16 {
+				return nil, fmt.Errorf("fmt chunk too small: %d bytes", chunkSize)
+			}
+
+			// Read fmt chunk data
+			fmtData := make([]byte, chunkSize)
+			if _, err := io.ReadFull(r, fmtData); err != nil {
+				return nil, fmt.Errorf("reading fmt chunk: %w", err)
+			}
+
+			audioFormat := binary.LittleEndian.Uint16(fmtData[0:2])
+			channels = int(binary.LittleEndian.Uint16(fmtData[2:4]))
+			sampleRate = int(binary.LittleEndian.Uint32(fmtData[4:8]))
+			bitsPerSample = int(binary.LittleEndian.Uint16(fmtData[14:16]))
+
+			if audioFormat != 1 {
+				return nil, fmt.Errorf("unsupported audio format: %d (only PCM supported)", audioFormat)
+			}
+
+			if bitsPerSample != 16 {
+				return nil, ErrOnlyPCM16bitSupported
+			}
+
+			foundFmt = true
+
+		case "data":
+			if !foundFmt {
+				return nil, fmt.Errorf("data chunk before fmt chunk")
+			}
+
+			foundData = true
+
+			// The rest of the reader is PCM data
+			// We don't need to track chunkSize, just read until EOF
+			return &source{
+				r:          r,
+				sampleRate: sampleRate,
+				channels:   channels,
+				buf:        make([]byte, 8192),
+			}, nil
+
+		default:
+			// Skip unknown chunks
+			skipBuf := make([]byte, chunkSize)
+			if _, err := io.ReadFull(r, skipBuf); err != nil {
+				return nil, fmt.Errorf("skipping chunk %s: %w", chunkID, err)
+			}
+
+			// WAV chunks are word-aligned (2-byte boundary)
+			if chunkSize%2 != 0 {
+				padding := make([]byte, 1)
+				io.ReadFull(r, padding) // ignore error, might be EOF
+			}
+		}
+	}
+
+	if !foundFmt {
 		return nil, ErrUnsupportedWavLayout
 	}
 
-	audioFormat := binary.LittleEndian.Uint16(header[20:22])
-	channels := int(binary.LittleEndian.Uint16(header[22:24]))
-	sampleRate := int(binary.LittleEndian.Uint32(header[24:28]))
-	bitsPerSample := int(binary.LittleEndian.Uint16(header[34:36]))
-
-	if audioFormat != 1 || bitsPerSample != 16 {
-		return nil, ErrOnlyPCM16bitSupported
-	}
-
-	// Expect "data" chunk at offset 36
-	if !bytes.HasPrefix(header[36:40], []byte("data")) {
+	if !foundData {
 		return nil, ErrUnsupportedWavChunks
 	}
 
-	// Data chunk size is at offset 40-44, but we'll just read until EOF
-	// dataSize := binary.LittleEndian.Uint32(header[40:44])
-
-	return &source{
-		r:          r,
-		sampleRate: sampleRate,
-		channels:   channels,
-		buf:        make([]byte, 8192),
-	}, nil
+	return nil, fmt.Errorf("unexpected end of WAV file")
 }
