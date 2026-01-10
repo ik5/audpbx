@@ -95,9 +95,11 @@ func TestFloat32ToInt16(t *testing.T) {
 func TestFloat32ToInt16Range(t *testing.T) {
 	t.Parallel()
 
+	var result int32
+
 	// Test that values in [-1, 1] produce valid int16 values
 	for f := -1.0; f <= 1.0; f += 0.01 {
-		result := Float32ToInt16(float32(f))
+		result = int32(Float32ToInt16(float32(f)))
 
 		// Result should be in valid int16 range (note: math.MinInt16 is valid for int16)
 		if result < math.MinInt16 || result > math.MaxInt16 {
@@ -106,7 +108,7 @@ func TestFloat32ToInt16Range(t *testing.T) {
 		}
 
 		// Result should be proportional to input (using 32768 as multiplier)
-		expected := int16(f * 32768.0)
+		expected := int32(f * 32768.0)
 		diff := int16(math.Abs(float64(result - expected)))
 
 		if diff > 1 {
