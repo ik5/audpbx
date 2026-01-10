@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -10,7 +9,6 @@ import (
 	"github.com/ik5/audpbx/formats/mp3"
 	"github.com/ik5/audpbx/formats/vorbis"
 	"github.com/ik5/audpbx/formats/wav"
-	"github.com/ik5/audpbx/utils"
 )
 
 func main() {
@@ -49,31 +47,7 @@ func main() {
     }
     defer src.Close()
 
-    // Pipeline: resample -> mono
-    res := audio.NewResampler(src, 8000)
-    mono := audio.NewMonoMixer(res)
-
-    // Stream and collect int16 samples
-    var pcm16 []int16
-
-    // Use a reasonable buffer size for mono output at 8kHz
-    // 4096 samples = ~512ms of audio at 8kHz
-    var buf = make([]float32, 4096)
-
-    for {
-        n, err := mono.ReadSamples(buf)
-        if n > 0 {
-            for i := range n {
-                pcm16 = append(pcm16, utils.Float32ToInt16(buf[i]))
-            }
-        }
-        if err == io.EOF {
-            break
-        }
-        if err != nil {
-            panic(err)
-        }
-    }
+    pcm16, sampleRate, err := audio.ResampleToMono16(src, 8000, 4096)
 
     // Write WAV mono 16-bit @ 8 kHz
     outFile, err := os.Create(outPath)
@@ -82,7 +56,7 @@ func main() {
     }
     defer outFile.Close()
 
-    if err := wav.WriteWAV16(outFile, 8000, pcm16); err != nil {
+    if err := wav.WriteWAV16(outFile, sampleRate, pcm16); err != nil {
         panic(err)
     }
 
