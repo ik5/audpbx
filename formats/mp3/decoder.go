@@ -8,8 +8,14 @@ import (
 	"github.com/ik5/audpbx/audio"
 )
 
+// mp3Reader is an interface for gomp3.Decoder to allow testing
+type mp3Reader interface {
+	Read([]byte) (int, error)
+	SampleRate() int
+}
+
 type source struct {
-	dec        *gomp3.Decoder
+	dec        mp3Reader
 	sampleRate int
 	channels   int
 	buf        []byte
@@ -40,7 +46,7 @@ func (s *source) ReadSamples(dst []float32) (int, error) {
 	// Convert bytes to samples
 	// Each sample is 2 bytes (int16 little-endian)
 	samples := n / 2
-	for i := 0; i < samples; i++ {
+	for i := range samples {
 		// Read int16 little-endian
 		low := uint16(s.buf[2*i])
 		high := uint16(s.buf[2*i+1])
