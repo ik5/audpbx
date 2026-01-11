@@ -15,56 +15,64 @@ func WriteWAV16(w io.Writer, sampleRate int, samples []int16) error {
     dataSize := uint32(len(samples) * 2)
     riffSize := 36 + dataSize
 
-    // RIFF header
-    if _, err := io.WriteString(w, "RIFF"); err != nil {
-        return fmt.Errorf("%w", err)
-    }
-    if err := binary.Write(w, binary.LittleEndian, riffSize); err != nil {
-        return fmt.Errorf("%w", err)
-    }
-    if _, err := io.WriteString(w, "WAVE"); err != nil {
+    // Pre-allocate buffer for entire header (44 bytes)
+    header := make([]byte, 44)
+
+    // RIFF header (12 bytes)
+    copy(header[0:4], "RIFF")
+    binary.LittleEndian.PutUint32(header[4:8], riffSize)
+    copy(header[8:12], "WAVE")
+
+    // fmt chunk (24 bytes)
+    copy(header[12:16], "fmt ")
+    binary.LittleEndian.PutUint32(header[16:20], 16)         // PCM fmt chunk size
+    binary.LittleEndian.PutUint16(header[20:22], 1)          // PCM format
+    binary.LittleEndian.PutUint16(header[22:24], numChannels)
+    binary.LittleEndian.PutUint32(header[24:28], uint32(sampleRate))
+    binary.LittleEndian.PutUint32(header[28:32], byteRate)
+    binary.LittleEndian.PutUint16(header[32:34], blockAlign)
+    binary.LittleEndian.PutUint16(header[34:36], bitsPerSample)
+
+    // data chunk header (8 bytes)
+    copy(header[36:40], "data")
+    binary.LittleEndian.PutUint32(header[40:44], dataSize)
+
+    // Write header in one operation
+    if _, err := w.Write(header); err != nil {
         return fmt.Errorf("%w", err)
     }
 
-    // fmt chunk
-    if _, err := io.WriteString(w, "fmt "); err != nil {
-        return fmt.Errorf("%w", err)
-    }
-    if err := binary.Write(w, binary.LittleEndian, uint32(16)); err != nil { // PCM fmt chunk size
-        return fmt.Errorf("%w", err)
-    }
-    if err := binary.Write(w, binary.LittleEndian, uint16(1)); err != nil { // PCM format
-        return fmt.Errorf("%w", err)
-    }
-    if err := binary.Write(w, binary.LittleEndian, numChannels); err != nil {
-        return fmt.Errorf("%w", err)
-    }
-    if err := binary.Write(w, binary.LittleEndian, uint32(sampleRate)); err != nil {
-        return fmt.Errorf("%w", err)
-    }
-    if err := binary.Write(w, binary.LittleEndian, byteRate); err != nil {
-        return fmt.Errorf("%w", err)
-    }
-    if err := binary.Write(w, binary.LittleEndian, blockAlign); err != nil {
-        return fmt.Errorf("%w", err)
-    }
-    if err := binary.Write(w, binary.LittleEndian, bitsPerSample); err != nil {
-        return fmt.Errorf("%w", err)
+    // Convert samples to bytes efficiently
+    // For better performance with large files, write in chunks
+    const chunkSize = 8192 // Write 8KB at a time
+    if len(samples) == 0 {
+        return nil
     }
 
-    // data chunk
-    if _, err := io.WriteString(w, "data"); err != nil {
-        return fmt.Errorf("%w", err)
-    }
-    if err := binary.Write(w, binary.LittleEndian, dataSize); err != nil {
-        return fmt.Errorf("%w", err)
-    }
+    // Allocate buffer for chunk writes
+    bufSize := min(len(samples), chunkSize)
+    buf := make([]byte, bufSize*2)
 
-    // samples
-    for _, s := range samples {
-        if err := binary.Write(w, binary.LittleEndian, s); err != nil {
+    for i := 0; i < len(samples); i += chunkSize {
+        end := min(i+chunkSize, len(samples))
+        chunk := samples[i:end]
+
+        // Resize buf if needed for last chunk
+        if len(chunk)*2 > len(buf) {
+            buf = buf[:len(chunk)*2]
+        } else {
+            buf = buf[:len(chunk)*2]
+        }
+
+        // Convert int16 samples to bytes
+        for j, s := range chunk {
+            binary.LittleEndian.PutUint16(buf[j*2:j*2+2], uint16(s))
+        }
+
+        if _, err := w.Write(buf); err != nil {
             return fmt.Errorf("%w", err)
         }
     }
+
     return nil
 }
