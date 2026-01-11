@@ -35,11 +35,17 @@ func (m *MonoMixer) ReadSamples(dst []float32) (int, error) {
         return m.src.ReadSamples(dst)
     }
 
-    // Ensure tmp can hold frames from src
-    if len(m.tmp) < len(dst)*m.src.Channels() {
-        m.tmp = make([]float32, len(dst)*m.src.Channels())
+    // Calculate how many frames we can fit in dst
+    maxFrames := len(dst)
+    samplesNeeded := maxFrames * m.src.Channels()
+
+    // Ensure tmp can hold enough data from src
+    if len(m.tmp) < samplesNeeded {
+        m.tmp = make([]float32, samplesNeeded)
     }
-    n, err := m.src.ReadSamples(m.tmp)
+
+    // Only read what we need
+    n, err := m.src.ReadSamples(m.tmp[:samplesNeeded])
     if n == 0 {
         return 0, err
     }
