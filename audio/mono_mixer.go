@@ -35,13 +35,22 @@ func (m *MonoMixer) ReadSamples(dst []float32) (int, error) {
         return m.src.ReadSamples(dst)
     }
 
+    channels := m.src.Channels()
     // Calculate how many frames we can fit in dst
     maxFrames := len(dst)
-    samplesNeeded := maxFrames * m.src.Channels()
+    samplesNeeded := maxFrames * channels
 
-    // Ensure tmp can hold enough data from src
-    if len(m.tmp) < samplesNeeded {
-        m.tmp = make([]float32, samplesNeeded)
+    // Grow tmp buffer if needed (but don't shrink to avoid thrashing)
+    if cap(m.tmp) < samplesNeeded {
+        // Allocate with some headroom to reduce future reallocations
+        newCap := samplesNeeded
+        if newCap < 8192 {
+            newCap = 8192 // Reasonable minimum
+        }
+        m.tmp = make([]float32, newCap)
+    } else if len(m.tmp) < samplesNeeded {
+        // Re-slice to needed size without reallocation
+        m.tmp = m.tmp[:samplesNeeded]
     }
 
     // Only read what we need
@@ -49,15 +58,33 @@ func (m *MonoMixer) ReadSamples(dst []float32) (int, error) {
     if n == 0 {
         return 0, err
     }
-    frames := n / m.src.Channels()
-    for f := range frames {
-        sum := float32(0)
+    frames := n / channels
 
-        for c := range m.src.Channels() {
-            sum += m.tmp[f*m.src.Channels()+c]
+    // Optimize: cache division result
+    invChannels := float32(1.0) / float32(channels)
+
+    // Unrolled loop for common cases
+    switch channels {
+    case 2: // Stereo (most common)
+        for f := range frames {
+            idx := f << 1 // f * 2
+            dst[f] = (m.tmp[idx] + m.tmp[idx+1]) * 0.5
         }
-
-        dst[f] = sum / float32(m.src.Channels())
+    case 4: // Quad
+        for f := range frames {
+            idx := f << 2 // f * 4
+            sum := m.tmp[idx] + m.tmp[idx+1] + m.tmp[idx+2] + m.tmp[idx+3]
+            dst[f] = sum * 0.25
+        }
+    default: // Generic path
+        for f := range frames {
+            sum := float32(0)
+            baseIdx := f * channels
+            for c := range channels {
+                sum += m.tmp[baseIdx+c]
+            }
+            dst[f] = sum * invChannels
+        }
     }
 
     return frames, err

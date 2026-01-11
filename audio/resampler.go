@@ -141,6 +141,11 @@ func (r *Resampler) ReadSamples(dst []float32) (int, error) {
 			if n > 0 {
 				copy(r.frames[i], r.srcBuf[:n])
 				r.hasFrame[i] = true
+
+				// Initialize filter state with first sample to avoid warm-up transients
+				if i == 0 && r.useFilter {
+					copy(r.filterState, r.srcBuf[:n])
+				}
 			}
 			if err == io.EOF {
 				r.eof = true
@@ -170,8 +175,12 @@ func (r *Resampler) ReadSamples(dst []float32) (int, error) {
 		for r.pos >= 1.0 {
 			r.pos -= 1.0
 			if err := r.fetchNextFrame(); err != nil {
-				if err == io.EOF && written > 0 {
-					return written * r.channels, nil
+				if err == io.EOF {
+					// Source exhausted - return what we have
+					if written == 0 {
+						return 0, io.EOF
+					}
+					return written * r.channels, io.EOF
 				}
 				return written * r.channels, err
 			}
@@ -183,7 +192,7 @@ func (r *Resampler) ReadSamples(dst []float32) (int, error) {
 			if written == 0 {
 				return 0, io.EOF
 			}
-			return written * r.channels, nil
+			return written * r.channels, io.EOF
 		}
 
 		// Cubic interpolation between frames

@@ -3,8 +3,6 @@ package audio
 import (
 	"fmt"
 	"io"
-
-	"github.com/ik5/audpbx/utils"
 )
 
 // ResampleToMono16 is a high-level convenience function that resamples audio to a target
@@ -43,15 +41,38 @@ func ResampleToMono16(src Source, targetRate int, bufferSize int) ([]int16, int,
 	resampler := NewResampler(src, targetRate)
 	mono := NewMonoMixer(resampler)
 
-	// Collect all samples
-	var pcm16 []int16
+	// Pre-allocate based on estimated output size to reduce allocations
+	// Estimate: (source_rate / target_rate) * source_duration
+	// We'll start with a reasonable default and grow if needed
+	estimatedSamples := targetRate * 2 // Assume ~2 seconds initially
+	pcm16 := make([]int16, 0, estimatedSamples)
 	buf := make([]float32, bufferSize)
 
 	for {
 		n, err := mono.ReadSamples(buf)
 		if n > 0 {
+			// Ensure capacity before batch conversion
+			if cap(pcm16)-len(pcm16) < n {
+				// Grow by at least n samples, or double capacity
+				newCap := len(pcm16) + max(n, cap(pcm16))
+				newSlice := make([]int16, len(pcm16), newCap)
+				copy(newSlice, pcm16)
+				pcm16 = newSlice
+			}
+
+			// Batch convert float32 to int16 (inlined for performance)
+			startIdx := len(pcm16)
+			pcm16 = pcm16[:startIdx+n]
+			const maxInt16 float32 = 32768.0
 			for i := range n {
-				pcm16 = append(pcm16, utils.Float32ToInt16(buf[i]))
+				x := buf[i]
+				// Clamp to [-1, 1]
+				if x > 1 {
+					x = 1
+				} else if x < -1 {
+					x = -1
+				}
+				pcm16[startIdx+i] = int16(x * maxInt16)
 			}
 		}
 

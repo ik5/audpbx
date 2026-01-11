@@ -214,7 +214,7 @@ func BenchmarkResampleToMono16(b *testing.B) {
 	// 1 second of stereo 44.1kHz audio
 	b.ReportAllocs()
 
-	for range b.N {
+	for b.Loop() {
 		src := newSineSource(44100, 2, 44100, 440.0)
 		_, _, _ = ResampleToMono16(src, 8000, 4096)
 	}
@@ -224,7 +224,7 @@ func BenchmarkResampleToMono16(b *testing.B) {
 func BenchmarkResampleToMono16_LargeBuffer(b *testing.B) {
 	b.ReportAllocs()
 
-	for range b.N {
+	for b.Loop() {
 		src := newSineSource(44100, 2, 44100, 440.0)
 		_, _, _ = ResampleToMono16(src, 8000, 16384)
 	}
@@ -234,7 +234,7 @@ func BenchmarkResampleToMono16_LargeBuffer(b *testing.B) {
 func BenchmarkResampleToMono16_SmallBuffer(b *testing.B) {
 	b.ReportAllocs()
 
-	for range b.N {
+	for b.Loop() {
 		src := newSineSource(44100, 2, 44100, 440.0)
 		_, _, _ = ResampleToMono16(src, 8000, 1024)
 	}
@@ -244,7 +244,7 @@ func BenchmarkResampleToMono16_SmallBuffer(b *testing.B) {
 func BenchmarkResampleToMono16_Upsample(b *testing.B) {
 	b.ReportAllocs()
 
-	for range b.N {
+	for b.Loop() {
 		src := newSineSource(8000, 2, 8000, 440.0)
 		_, _, _ = ResampleToMono16(src, 44100, 4096)
 	}
