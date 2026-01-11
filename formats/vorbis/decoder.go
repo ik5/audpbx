@@ -8,8 +8,15 @@ import (
 	"github.com/jfreymuth/oggvorbis"
 )
 
+// oggReader is an interface for oggvorbis.Reader to allow testing
+type oggReader interface {
+	SampleRate() int
+	Channels() int
+	Read([]float32) (int, error)
+}
+
 type source struct {
-	dec        *oggvorbis.Reader
+	dec        oggReader
 	sampleRate int
 	channels   int
 	frameBuf   []float32 // buffer for reading frames from decoder
