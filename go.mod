@@ -16,6 +16,7 @@ require (
 )
 
 require (
+	github.com/go-audio/aiff v1.1.0 // indirect
 	github.com/go-audio/riff v1.0.0 // indirect
 	github.com/jfreymuth/vorbis v1.0.2 // indirect
 )
