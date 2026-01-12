@@ -57,6 +57,19 @@ func TestErrUnsupportedWavChunks(t *testing.T) {
 	}
 }
 
+func TestErrNegativePosition(t *testing.T) {
+	t.Parallel()
+
+	if ErrNegativePosition == nil {
+		t.Fatal("ErrNegativePosition is nil")
+	}
+
+	expected := "negative position"
+	if ErrNegativePosition.Error() != expected {
+		t.Errorf("ErrNegativePosition.Error() = %q, want %q", ErrNegativePosition.Error(), expected)
+	}
+}
+
 func TestErrors_AreErrors(t *testing.T) {
 	t.Parallel()
 
@@ -82,6 +95,11 @@ func TestErrors_AreErrors(t *testing.T) {
 	if err == nil {
 		t.Error("ErrUnsupportedWavChunks does not implement error interface")
 	}
+
+	err = ErrNegativePosition
+	if err == nil {
+		t.Error("ErrNegativePosition does not implement error interface")
+	}
 }
 
 func TestErrors_IsComparison(t *testing.T) {
@@ -95,6 +113,7 @@ func TestErrors_IsComparison(t *testing.T) {
 		{"ErrUnsupportedWavLayout", ErrUnsupportedWavLayout},
 		{"ErrOnlyPCM16bitSupported", ErrOnlyPCM16bitSupported},
 		{"ErrUnsupportedWavChunks", ErrUnsupportedWavChunks},
+		{"ErrNegativePosition", ErrNegativePosition},
 	}
 
 	for _, tt := range tests {
@@ -126,6 +145,7 @@ func TestErrors_Wrapping(t *testing.T) {
 		{"ErrUnsupportedWavLayout", ErrUnsupportedWavLayout},
 		{"ErrOnlyPCM16bitSupported", ErrOnlyPCM16bitSupported},
 		{"ErrUnsupportedWavChunks", ErrUnsupportedWavChunks},
+		{"ErrNegativePosition", ErrNegativePosition},
 	}
 
 	for _, tt := range tests {
@@ -150,6 +170,7 @@ func TestErrors_Uniqueness(t *testing.T) {
 		ErrUnsupportedWavLayout,
 		ErrOnlyPCM16bitSupported,
 		ErrUnsupportedWavChunks,
+		ErrNegativePosition,
 	}
 
 	for i := range allErrors {
@@ -171,6 +192,7 @@ func TestErrors_Messages(t *testing.T) {
 		"ErrUnsupportedWavLayout":  ErrUnsupportedWavLayout,
 		"ErrOnlyPCM16bitSupported": ErrOnlyPCM16bitSupported,
 		"ErrUnsupportedWavChunks":  ErrUnsupportedWavChunks,
+		"ErrNegativePosition": ErrNegativePosition,
 	}
 
 	for name, err := range allErrors {
