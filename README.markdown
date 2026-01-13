@@ -449,3 +449,22 @@ This project is licensed under the **Eclipse Public License 2.0** — see the [L
 - Built with Go 1.23+ features (range-over-int, b.Loop())
 - Inspired by telephony and VoIP audio processing requirements
 - Uses industry-standard audio libraries for format support
+
+## Caveat
+
+This project is a vibe coding-based package created for the following reasons:
+
+1. Allows projects such as APIs to handle common audio formats and convert them to Open Source PBX-ready audio (such as [Asterisk PBX](https://www.asterisk.org/) and [FreeSWITCH](https://signalwire.com/freeswitch)).
+2. Native Go code first (additional non-native formats will be added in the future).
+3. Good documentation.
+4. Comprehensive unit testing.
+5. Zero-allocation code.
+6. Testing Claude Code for vibe coding.
+
+## TODO
+
+The following features are planned:
+
+* [ ] Support Opus format.
+* [ ] Support AAC format (as binding with static linking, static building, dynamic library - building based on tags).
+* [ ] Additional audio test files for each format.
