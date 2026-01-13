@@ -1,16 +1,18 @@
-package audio
+package audpbx
 
 import (
 	"io"
 	"math"
 	"testing"
+
+	"github.com/ik5/audpbx/internal/audiotest"
 )
 
 func TestResampleToMono16_Basic(t *testing.T) {
 	t.Parallel()
 
 	// Create 1 second of stereo audio at 44.1kHz
-	src := newSineSource(44100, 2, 44100, 440.0)
+	src := audiotest.NewSineSource(44100, 2, 44100, 440.0)
 
 	pcm16, rate, err := ResampleToMono16(src, 8000, 4096)
 
@@ -42,7 +44,7 @@ func TestResampleToMono16_AlreadyMono(t *testing.T) {
 	t.Parallel()
 
 	// Source is already mono
-	src := newConstantSource(16000, 1, 16000, 0.5)
+	src := audiotest.NewConstantSource(16000, 1, 16000, 0.5)
 
 	pcm16, rate, err := ResampleToMono16(src, 8000, 4096)
 
@@ -75,7 +77,7 @@ func TestResampleToMono16_Silence(t *testing.T) {
 	t.Parallel()
 
 	// Stereo silence
-	src := newSilentSource(44100, 2, 44100)
+	src := audiotest.NewSilentSource(44100, 2, 44100)
 
 	pcm16, rate, err := ResampleToMono16(src, 8000, 4096)
 
@@ -99,7 +101,7 @@ func TestResampleToMono16_EmptySource(t *testing.T) {
 	t.Parallel()
 
 	// Source with no samples
-	src := newSilentSource(44100, 2, 0)
+	src := audiotest.NewSilentSource(44100, 2, 0)
 
 	pcm16, rate, err := ResampleToMono16(src, 8000, 4096)
 
@@ -155,7 +157,7 @@ func TestResampleToMono16_VariousRates(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			src := newSineSource(tt.srcRate, 2, tt.srcSamples, 440.0)
+			src := audiotest.NewSineSource(tt.srcRate, 2, tt.srcSamples, 440.0)
 
 			pcm16, rate, err := ResampleToMono16(src, tt.dstRate, 4096)
 
@@ -183,7 +185,7 @@ func TestResampleToMono16_Clamping(t *testing.T) {
 	t.Parallel()
 
 	// Source with values outside [-1, 1] to test clamping
-	src := newMockSource(8000, 1, 100, func(sample int, channel int) float32 {
+	src := audiotest.NewMockSource(8000, 1, 100, func(sample int, channel int) float32 {
 		if sample%3 == 0 {
 			return 2.0 // Should clamp to 1.0 -> 32767
 		}
@@ -215,7 +217,7 @@ func BenchmarkResampleToMono16(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src := newSineSource(44100, 2, 44100, 440.0)
+		src := audiotest.NewSineSource(44100, 2, 44100, 440.0)
 		_, _, _ = ResampleToMono16(src, 8000, 4096)
 	}
 }
@@ -225,7 +227,7 @@ func BenchmarkResampleToMono16_LargeBuffer(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src := newSineSource(44100, 2, 44100, 440.0)
+		src := audiotest.NewSineSource(44100, 2, 44100, 440.0)
 		_, _, _ = ResampleToMono16(src, 8000, 16384)
 	}
 }
@@ -235,7 +237,7 @@ func BenchmarkResampleToMono16_SmallBuffer(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src := newSineSource(44100, 2, 44100, 440.0)
+		src := audiotest.NewSineSource(44100, 2, 44100, 440.0)
 		_, _, _ = ResampleToMono16(src, 8000, 1024)
 	}
 }
@@ -245,7 +247,7 @@ func BenchmarkResampleToMono16_Upsample(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src := newSineSource(8000, 2, 8000, 440.0)
+		src := audiotest.NewSineSource(8000, 2, 8000, 440.0)
 		_, _, _ = ResampleToMono16(src, 44100, 4096)
 	}
 }

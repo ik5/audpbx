@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ik5/audpbx"
 	"github.com/ik5/audpbx/audio"
+	"github.com/ik5/audpbx/formats/aiff"
 	"github.com/ik5/audpbx/formats/mp3"
 	"github.com/ik5/audpbx/formats/vorbis"
 	"github.com/ik5/audpbx/formats/wav"
@@ -24,6 +26,8 @@ func main() {
     reg.Register("wav", wav.Decoder{})
     reg.Register("mp3", mp3.Decoder{})
     reg.Register("ogg", vorbis.Decoder{})
+    reg.Register("aif", aiff.Decoder{})
+    reg.Register("aiff", aiff.Decoder{})
 
     ext := filepath.Ext(inPath)
     if len(ext) > 0 {
@@ -47,7 +51,7 @@ func main() {
     }
     defer src.Close()
 
-    pcm16, sampleRate, err := audio.ResampleToMono16(src, 8000, 4096)
+    pcm16, sampleRate, err := audpbx.ResampleToMono16(src, 8000, 4096)
 
     // Write WAV mono 16-bit @ 8 kHz
     outFile, err := os.Create(outPath)

@@ -233,7 +233,7 @@ func BenchmarkResampler_Downsample(b *testing.B) {
 	b.ReportAllocs()
 
 	for range b.N {
-		src.generated = 0 // Reset
+		src.Reset() // Reset
 		for {
 			_, err := resampler.ReadSamples(buf)
 			if err == io.EOF {
@@ -253,7 +253,7 @@ func BenchmarkResampler_Upsample(b *testing.B) {
 	b.ReportAllocs()
 
 	for range b.N {
-		src.generated = 0 // Reset
+		src.Reset() // Reset
 		for {
 			_, err := resampler.ReadSamples(buf)
 			if err == io.EOF {
@@ -273,7 +273,7 @@ func BenchmarkResampler_ReadSamples(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.generated = 0
+		src.Reset()
 		_, _ = resampler.ReadSamples(buf)
 	}
 }
@@ -293,7 +293,7 @@ func TestResampler_MinimalAllocs(t *testing.T) {
 	resampler.ReadSamples(buf)
 
 	allocs := testing.AllocsPerRun(100, func() {
-		src.generated = 0
+		src.Reset()
 		_, _ = resampler.ReadSamples(buf)
 	})
 
@@ -483,7 +483,7 @@ func BenchmarkResampler_MultiChannel(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.generated = 0
+		src.Reset()
 		for {
 			_, err := resampler.ReadSamples(buf)
 			if err == io.EOF {
@@ -503,7 +503,7 @@ func BenchmarkResampler_SmallBuffer(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.generated = 0
+		src.Reset()
 		for {
 			_, err := resampler.ReadSamples(buf)
 			if err == io.EOF {
