@@ -11,4 +11,7 @@ var (
 
 	// ErrUnsupportedAiffLayout indicates an unsupported AIFF layout
 	ErrUnsupportedAiffLayout = errors.New("unsupported AIFF layout")
+
+	// ErrUnsupportedAiffChunks indicates unsupported or malformed AIFF chunks
+	ErrUnsupportedAiffChunks = errors.New("unsupported or malformed AIFF chunks")
 )
