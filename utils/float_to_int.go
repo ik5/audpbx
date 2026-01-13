@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: EPL-2.0
+
 package utils
 
 func Float32ToInt16(x float32) int16 {
