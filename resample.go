@@ -1,8 +1,10 @@
-package audio
+package audpbx
 
 import (
 	"fmt"
 	"io"
+
+	"github.com/ik5/audpbx/audio"
 )
 
 // ResampleToMono16 is a high-level convenience function that resamples audio to a target
@@ -36,10 +38,10 @@ import (
 //	    panic(err)
 //	}
 //	// pcm16 now contains mono 16-bit PCM at 8kHz
-func ResampleToMono16(src Source, targetRate int, bufferSize int) ([]int16, int, error) {
+func ResampleToMono16(src audio.Source, targetRate int, bufferSize int) ([]int16, int, error) {
 	// Create the processing pipeline: resample -> mono
-	resampler := NewResampler(src, targetRate)
-	mono := NewMonoMixer(resampler)
+	resampler := audio.NewResampler(src, targetRate)
+	mono := audio.NewMonoMixer(resampler)
 
 	// Pre-allocate based on estimated output size to reduce allocations
 	// Estimate: (source_rate / target_rate) * source_duration

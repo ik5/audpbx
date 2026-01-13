@@ -175,7 +175,7 @@ func BenchmarkMonoMixer_Passthrough(b *testing.B) {
 	b.ReportAllocs()
 
 	for range b.N {
-		src.generated = 0 // Reset for next iteration
+		src.Reset() // Reset for next iteration
 		for {
 			_, err := mixer.ReadSamples(buf)
 			if err == io.EOF {
@@ -195,7 +195,7 @@ func BenchmarkMonoMixer_StereoToMono(b *testing.B) {
 	b.ReportAllocs()
 
 	for range b.N {
-		src.generated = 0 // Reset for next iteration
+		src.Reset() // Reset for next iteration
 		for {
 			_, err := mixer.ReadSamples(buf)
 			if err == io.EOF {
@@ -215,7 +215,7 @@ func BenchmarkMonoMixer_ReadSamples(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.generated = 0
+		src.Reset()
 		_, _ = mixer.ReadSamples(buf)
 	}
 }
@@ -234,7 +234,7 @@ func BenchmarkMonoMixer_ZeroAllocs(b *testing.B) {
 	mixer.ReadSamples(buf)
 
 	allocs := testing.AllocsPerRun(100, func() {
-		src.generated = 0
+		src.Reset()
 		_, _ = mixer.ReadSamples(buf)
 	})
 
@@ -370,7 +370,7 @@ func BenchmarkMonoMixer_ManyChannels(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.generated = 0
+		src.Reset()
 		for {
 			_, err := mixer.ReadSamples(buf)
 			if err == io.EOF {
@@ -390,7 +390,7 @@ func BenchmarkMonoMixer_SmallReads(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.generated = 0
+		src.Reset()
 		for {
 			_, err := mixer.ReadSamples(buf)
 			if err == io.EOF {
