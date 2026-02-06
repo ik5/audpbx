@@ -9,11 +9,15 @@
 
 - **Multiple Format Support**: Decode WAV, MP3, Ogg Vorbis, and AIFF audio files
 - **High-Quality Resampling**: Cubic interpolation for sample rate conversion with minimal artifacts
-- **Channel Mixing**: Convert stereo/multi-channel audio to mono
+- **Advanced Channel Processing**: Split, extract, process individual channels from multi-channel audio
+- **Channel Mixing**: Convert stereo/multi-channel audio to mono with customizable mixdown
+- **Audio Effects**: Gain adjustment, normalization, channel mapping
+- **High-Level API**: Powerful ProcessChannels function with flexible options (similar to pydub)
 - **Performance Optimized**: Near-zero allocations, optimized for throughput
 - **Simple API**: Clean, idiomatic Go interfaces
 - **Streaming Support**: Process audio without loading entire files into memory
 - **Comprehensive Testing**: Extensive unit tests and benchmarks
+- **Beginner-Friendly Documentation**: Detailed explanations of audio concepts for newcomers
 
 ## Installation
 
@@ -105,6 +109,57 @@ func main() {
 }
 ```
 
+### Process Multi-Channel Audio (New!)
+
+Split stereo audio into separate channels and process them independently:
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "os"
+    
+    "github.com/ik5/audpbx"
+    "github.com/ik5/audpbx/audio"
+    "github.com/ik5/audpbx/formats/wav"
+)
+
+func main() {
+    // Open stereo audio file
+    file, _ := os.Open("stereo.wav")
+    defer file.Close()
+    
+    decoder := wav.Decoder{}
+    src, _ := decoder.Decode(file)
+    defer src.Close()
+    
+    // Split into separate mono channels, resample, and save
+    result, err := audpbx.ProcessChannels(src, audio.LayoutStereo,
+        audpbx.WithResample(func(ch audio.Channel) int {
+            return 16000 // Resample all channels to 16kHz
+        }),
+        audpbx.WithGain(func(ch audio.Channel) float32 {
+            return 1.2 // Boost volume by 20%
+        }),
+        audpbx.WithSaveToFile(func(ch audio.Channel) string {
+            return fmt.Sprintf("channel_%s.wav", ch)
+        }),
+    )
+    
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    if result.HasErrors() {
+        for _, e := range result.Errors {
+            log.Printf("Error processing %s: %v", e.Channel, e.Err)
+        }
+    }
+}
+```
+
 ## Supported Formats
 
 | Format | Decoder | Encoder | Notes |
@@ -123,8 +178,22 @@ The library is organized into three main layers:
 Convenient functions for common tasks:
 
 ```go
-// Resample audio to target rate, convert to mono, return int16 PCM
+// Simple: Resample audio to target rate, convert to mono, return int16 PCM
 pcm16, rate, err := audpbx.ResampleToMono16(src, targetRate, bufferSize)
+
+// Advanced: Process multi-channel audio with flexible options
+result, err := audpbx.ProcessChannels(src, audio.LayoutStereo,
+    audpbx.WithChannels(audio.ChannelFrontLeft, audio.ChannelFrontRight),
+    audpbx.WithResample(func(ch audio.Channel) int { return 48000 }),
+    audpbx.WithGain(func(ch audio.Channel) float32 { return 1.5 }),
+    audpbx.WithNormalize(func(ch audio.Channel) bool { return true }),
+    audpbx.WithSaveToFile(func(ch audio.Channel) string {
+        return fmt.Sprintf("%s.wav", ch)
+    }),
+)
+
+// Split stereo/surround into individual mono channels
+monoSources, err := audpbx.SplitToMonoSources(src)
 ```
 
 ### 2. Audio Processing (`audio` package)
@@ -155,6 +224,38 @@ aiffDecoder := aiff.Decoder{}
 // All decoders implement the same interface
 src, err := decoder.Decode(reader)
 ```
+
+## Audio Processing Concepts
+
+For those new to audio processing, here's a quick guide to key concepts:
+
+### Sample Rate
+How many times per second audio is measured (in Hz). Higher rates capture more detail:
+- **8000 Hz**: Telephone quality (minimum for speech)
+- **16000 Hz**: Wideband speech (better quality calls)  
+- **44100 Hz**: CD quality (music standard)
+- **48000 Hz**: Professional audio/video
+
+### Channels
+Independent audio streams in multi-channel audio:
+- **Mono (1)**: Single channel (one speaker)
+- **Stereo (2)**: Two channels (left and right speakers)
+- **5.1 Surround (6)**: Front-left, front-right, center, subwoofer, back-left, back-right
+
+### Resampling
+Changing the sample rate without affecting pitch or speed. Used to convert between standards or reduce bandwidth.
+
+### Gain
+Volume multiplier applied to audio:
+- **1.0**: No change (original volume)
+- **2.0**: Double the volume (+6 dB)
+- **0.5**: Half the volume (-6 dB)
+
+### Normalization
+Automatically adjusting volume to use the full dynamic range without clipping (distortion). Finds the loudest point and scales everything proportionally.
+
+### Mixdown/Downmixing
+Combining multiple channels into mono by averaging. For example, stereo to mono: `output = (left + right) / 2`
 
 ## Advanced Usage
 
@@ -262,6 +363,96 @@ pcm44k, _, _ := audpbx.ResampleToMono16(src, 44100, 4096) // 44.1 kHz (CD)
 pcm48k, _, _ := audpbx.ResampleToMono16(src, 48000, 4096) // 48 kHz (professional)
 ```
 
+### High-Level Channel Processing (New!)
+
+Process individual channels with flexible options (similar to pydub):
+
+```go
+// Example 1: Extract and save only specific channels from 5.1 audio
+result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
+    // Select only front speakers
+    audpbx.WithChannels(
+        audio.ChannelFrontLeft,
+        audio.ChannelFrontRight,
+        audio.ChannelFrontCenter,
+    ),
+    audpbx.WithSaveToFile(func(ch audio.Channel) string {
+        return fmt.Sprintf("channel_%s.wav", ch)
+    }),
+)
+
+// Example 2: Resample different channels to different rates
+result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
+    audpbx.WithResample(func(ch audio.Channel) int {
+        if ch == audio.ChannelLFE {
+            return 8000  // Subwoofer doesn't need high sample rate
+        }
+        return 44100 // Other channels at full quality
+    }),
+    audpbx.WithSaveToFile(func(ch audio.Channel) string {
+        return fmt.Sprintf("%s.wav", ch)
+    }),
+)
+
+// Example 3: Apply gain and normalization
+result, err := audpbx.ProcessChannels(src, audio.LayoutStereo,
+    // Boost volume by 50%
+    audpbx.WithGain(func(ch audio.Channel) float32 {
+        return 1.5
+    }),
+    // Then normalize to prevent clipping
+    audpbx.WithNormalize(func(ch audio.Channel) bool {
+        return true
+    }),
+    audpbx.WithSaveToFile(func(ch audio.Channel) string {
+        return fmt.Sprintf("%s_processed.wav", ch)
+    }),
+)
+
+// Example 4: Mix all channels to mono
+result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
+    audpbx.WithMixdown("mono_mix.wav"),
+)
+
+// Example 5: Process channels concurrently for better performance
+result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
+    audpbx.WithConcurrency(4), // Process 4 channels at a time
+    audpbx.WithResample(func(ch audio.Channel) int { return 48000 }),
+    audpbx.WithSaveToFile(func(ch audio.Channel) string {
+        return fmt.Sprintf("%s_48k.wav", ch)
+    }),
+)
+
+// Example 6: Swap left and right channels
+result, err := audpbx.ProcessChannels(src, audio.LayoutStereo,
+    audpbx.WithChannelMapping(map[audio.Channel]audio.Channel{
+        audio.ChannelFrontLeft:  audio.ChannelFrontRight,
+        audio.ChannelFrontRight: audio.ChannelFrontLeft,
+    }),
+    audpbx.WithSaveToFile(func(ch audio.Channel) string {
+        return fmt.Sprintf("%s_swapped.wav", ch)
+    }),
+)
+```
+
+### Available Processing Options
+
+The `ProcessChannels` function supports these options:
+
+- **`WithChannels`**: Select specific channels to process
+- **`WithResample`**: Change sample rate per channel
+- **`WithGain`**: Adjust volume (multiply samples)
+- **`WithNormalize`**: Auto-maximize volume without clipping
+- **`WithMixdown`**: Combine all channels to mono
+- **`WithSaveToFile`**: Save to files
+- **`WithSaveToWriter`**: Save to io.Writer
+- **`WithConcurrency`**: Process multiple channels simultaneously
+- **`WithErrorHandler`**: Handle errors per channel
+- **`WithChannelMapping`**: Swap/remap channels
+- **`WithProcessor`**: Apply custom processing
+- **`WithProgress`**: Track processing progress
+- **`WithBufferSize`**: Configure buffer size
+
 ## Performance
 
 The library is designed for high performance with minimal allocations:
@@ -269,11 +460,23 @@ The library is designed for high performance with minimal allocations:
 ### Benchmarks
 
 ```
-BenchmarkResampler_44100to8000-8      	   12693	     89207 ns/op	      96 B/op	       2 allocs/op
-BenchmarkResampler_48000to16000-8     	   12842	     92584 ns/op	      96 B/op	       2 allocs/op
-BenchmarkMonoMixer_Stereo-8           	 1000000	      1044 ns/op	       0 B/op	       0 allocs/op
-BenchmarkWAVWriter-8                  	   25880	     45842 ns/op	      11 B/op	       0 allocs/op
-BenchmarkAIFFDecoder-8                	  158761	      7536 ns/op	       0 B/op	       0 allocs/op
+# Core audio processing
+BenchmarkResampleToMono16-8                      4.5ms   115KB   13 allocs/op
+BenchmarkResampleToMono16_LargeBuffer-8          4.1ms   262KB   13 allocs/op
+BenchmarkResampleToMono16_SmallBuffer-8          4.0ms    70KB   12 allocs/op
+BenchmarkResampleToMono16_Upsample-8             1.6ms   262KB   13 allocs/op
+
+# High-level channel processing (new!)
+BenchmarkSplitToMonoSources-8                    4.4µs   352B     3 allocs/op
+BenchmarkProcessAndSaveChannel-8                 1.2ms   859KB   18 allocs/op
+BenchmarkProcessAndSaveChannelWriter-8           1.0ms   865KB   16 allocs/op
+BenchmarkProcessChannels_Stereo-8                1.3ms  1034KB   27 allocs/op
+BenchmarkProcessChannels_5Point1-8               3.6ms  1447KB   68 allocs/op
+BenchmarkProcessChannels_WithResample-8          2.6ms  1047KB   41 allocs/op
+BenchmarkProcessChannels_WithGain-8              1.4ms  1034KB   30 allocs/op
+BenchmarkProcessChannels_Concurrent-8            2.5ms  1449KB   90 allocs/op
+BenchmarkProcessChannels_SelectiveChannels-8     1.0ms   548KB   29 allocs/op
+BenchmarkProcessChannels_ComplexPipeline-8       3.4ms   582KB   46 allocs/op
 ```
 
 ### Optimization Tips
@@ -327,6 +530,54 @@ func ResampleToMono16(src audio.Source, targetRate int, bufferSize int) ([]int16
 - **targetRate**: Target sample rate (e.g., 8000, 16000, 44100)
 - **bufferSize**: Processing buffer size (typical: 4096)
 - **Returns**: PCM samples, actual sample rate, error
+
+#### `audpbx.ProcessChannels()` (New!)
+
+Advanced multi-channel processing with flexible options:
+
+```go
+func ProcessChannels(src audio.Source, layout audio.Channel, opts ...ChannelOption) (*ProcessingResult, error)
+```
+
+- **src**: Input audio source (stereo, 5.1, etc.)
+- **layout**: Channel layout (e.g., `audio.LayoutStereo`, `audio.Layout5Point1`)
+- **opts**: Processing options (WithResample, WithGain, WithNormalize, etc.)
+- **Returns**: Processing result with any errors, error
+
+Example:
+```go
+result, err := audpbx.ProcessChannels(src, audio.LayoutStereo,
+    audpbx.WithResample(func(ch audio.Channel) int { return 48000 }),
+    audpbx.WithGain(func(ch audio.Channel) float32 { return 1.5 }),
+    audpbx.WithSaveToFile(func(ch audio.Channel) string {
+        return fmt.Sprintf("%s.wav", ch)
+    }),
+)
+```
+
+#### `audpbx.SplitToMonoSources()` (New!)
+
+Split multi-channel audio into separate mono sources:
+
+```go
+func SplitToMonoSources(src audio.Source) ([]audio.Source, error)
+```
+
+- **src**: Multi-channel audio source
+- **Returns**: Slice of mono sources (one per channel), error
+
+#### `audpbx.ProcessAndSaveChannel()` (New!)
+
+Process and save a single mono channel:
+
+```go
+func ProcessAndSaveChannel(mono audio.Source, rate int, path string) error
+```
+
+- **mono**: Mono audio source (must be 1 channel)
+- **rate**: Target sample rate
+- **path**: Output file path
+- **Returns**: error
 
 ### Format-Specific APIs
 

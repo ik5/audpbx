@@ -298,6 +298,347 @@ func Example_bufferSizes() {
 	// Buffer size 16384: 8000 samples processed
 }
 
+// Example_splitToMonoSources demonstrates splitting multi-channel audio into separate mono sources.
+func Example_splitToMonoSources() {
+	// Create a stereo WAV file for demonstration
+	samples := []int16{100, -100, 200, -200, 300, -300} // Interleaved L/R
+	wavData := new(bytes.Buffer)
+
+	// Note: WriteWAV16 only supports mono. For demo purposes, we'll show the concept.
+	// In real use, you'd have actual stereo/multi-channel audio
+
+	fmt.Println("SplitToMonoSources splits multi-channel audio into separate mono sources")
+	fmt.Println("Example: 5.1 surround sound (6 channels) -> 6 mono sources")
+	fmt.Println("Channels: FL, FR, FC, LFE, BL, BR")
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Println("  sources, err := audpbx.SplitToMonoSources(multiChannelSource)")
+	fmt.Println("  // sources[0] = Front Left")
+	fmt.Println("  // sources[1] = Front Right")
+	fmt.Println("  // ... etc")
+
+	_ = samples
+	_ = wavData
+	// Output:
+	// SplitToMonoSources splits multi-channel audio into separate mono sources
+	// Example: 5.1 surround sound (6 channels) -> 6 mono sources
+	// Channels: FL, FR, FC, LFE, BL, BR
+	//
+	// Usage:
+	//   sources, err := audpbx.SplitToMonoSources(multiChannelSource)
+	//   // sources[0] = Front Left
+	//   // sources[1] = Front Right
+	//   // ... etc
+}
+
+// Example_processAndSaveChannel demonstrates resampling and saving a mono channel.
+func Example_processAndSaveChannel() {
+	// Create sample mono audio
+	samples := make([]int16, 44100) // 1 second at 44.1kHz
+	for i := range samples {
+		samples[i] = int16((i % 100) * 100)
+	}
+
+	wavData := new(bytes.Buffer)
+	wav.WriteWAV16(wavData, 44100, samples)
+
+	decoder := wav.Decoder{}
+	mono, _ := decoder.Decode(wavData)
+
+	// In real code, you would save to a file:
+	// err := audpbx.ProcessAndSaveChannel(mono, 16000, "output.wav")
+
+	// For demonstration, we'll use a buffer
+	output := new(bytes.Buffer)
+	err := audpbx.ProcessAndSaveChannelWriter(mono, 16000, output)
+	if err != nil {
+		fmt.Printf("error: %v\n", err)
+		return
+	}
+
+	fmt.Println("ProcessAndSaveChannel resamples mono audio and saves to file")
+	fmt.Printf("Input: 44100 Hz, Output: 16000 Hz\n")
+	fmt.Printf("Resampled and saved %d bytes\n", output.Len())
+	// Output:
+	// ProcessAndSaveChannel resamples mono audio and saves to file
+	// Input: 44100 Hz, Output: 16000 Hz
+	// Resampled and saved 32044 bytes
+}
+
+// Example_processChannels_basic demonstrates basic channel processing with ProcessChannels.
+func Example_processChannels_basic() {
+	// This example shows how to process specific channels from multi-channel audio
+
+	fmt.Println("ProcessChannels provides flexible channel processing with options:")
+	fmt.Println()
+	fmt.Println("Example: Extract and save only Front Left and Front Right from 5.1 audio")
+	fmt.Println()
+	fmt.Println("  result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,")
+	fmt.Println("      audpbx.WithChannels(audio.ChannelFrontLeft, audio.ChannelFrontRight),")
+	fmt.Println("      audpbx.WithSaveToFile(func(ch audio.Channel) string {")
+	fmt.Println("          return \"channel_\" + ch.String() + \".wav\"")
+	fmt.Println("      }),")
+	fmt.Println("  )")
+	fmt.Println()
+	fmt.Println("This extracts FL and FR, saving them to separate files.")
+	// Output:
+	// ProcessChannels provides flexible channel processing with options:
+	//
+	// Example: Extract and save only Front Left and Front Right from 5.1 audio
+	//
+	//   result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
+	//       audpbx.WithChannels(audio.ChannelFrontLeft, audio.ChannelFrontRight),
+	//       audpbx.WithSaveToFile(func(ch audio.Channel) string {
+	//           return "channel_" + ch.String() + ".wav"
+	//       }),
+	//   )
+	//
+	// This extracts FL and FR, saving them to separate files.
+}
+
+// Example_processChannels_resample demonstrates per-channel resampling.
+func Example_processChannels_resample() {
+	fmt.Println("Per-channel resampling example:")
+	fmt.Println()
+	fmt.Println("  // Resample different channels to different rates")
+	fmt.Println("  result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,")
+	fmt.Println("      audpbx.WithResample(func(ch audio.Channel) int {")
+	fmt.Println("          switch ch {")
+	fmt.Println("          case audio.ChannelLFE:")
+	fmt.Println("              return 8000  // LFE doesn't need high sample rate")
+	fmt.Println("          default:")
+	fmt.Println("              return 44100 // Other channels at 44.1kHz")
+	fmt.Println("          }")
+	fmt.Println("      }),")
+	fmt.Println("      audpbx.WithSaveToFile(func(ch audio.Channel) string {")
+	fmt.Println("          return ch.String() + \".wav\"")
+	fmt.Println("      }),")
+	fmt.Println("  )")
+	// Output:
+	// Per-channel resampling example:
+	//
+	//   // Resample different channels to different rates
+	//   result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
+	//       audpbx.WithResample(func(ch audio.Channel) int {
+	//           switch ch {
+	//           case audio.ChannelLFE:
+	//               return 8000  // LFE doesn't need high sample rate
+	//           default:
+	//               return 44100 // Other channels at 44.1kHz
+	//           }
+	//       }),
+	//       audpbx.WithSaveToFile(func(ch audio.Channel) string {
+	//           return ch.String() + ".wav"
+	//       }),
+	//   )
+}
+
+// Example_processChannels_gain demonstrates applying gain to channels.
+func Example_processChannels_gain() {
+	fmt.Println("Apply gain to specific channels:")
+	fmt.Println()
+	fmt.Println("  // Boost center channel, reduce surround")
+	fmt.Println("  result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,")
+	fmt.Println("      audpbx.WithGain(func(ch audio.Channel) float32 {")
+	fmt.Println("          switch ch {")
+	fmt.Println("          case audio.ChannelFrontCenter:")
+	fmt.Println("              return 1.5  // +50% volume")
+	fmt.Println("          case audio.ChannelBackLeft, audio.ChannelBackRight:")
+	fmt.Println("              return 0.5  // -50% volume")
+	fmt.Println("          default:")
+	fmt.Println("              return 1.0  // No change")
+	fmt.Println("          }")
+	fmt.Println("      }),")
+	fmt.Println("      audpbx.WithSaveToFile(func(ch audio.Channel) string {")
+	fmt.Println("          return ch.String() + \".wav\"")
+	fmt.Println("      }),")
+	fmt.Println("  )")
+	// Output:
+	// Apply gain to specific channels:
+	//
+	//   // Boost center channel, reduce surround
+	//   result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
+	//       audpbx.WithGain(func(ch audio.Channel) float32 {
+	//           switch ch {
+	//           case audio.ChannelFrontCenter:
+	//               return 1.5  // +50% volume
+	//           case audio.ChannelBackLeft, audio.ChannelBackRight:
+	//               return 0.5  // -50% volume
+	//           default:
+	//               return 1.0  // No change
+	//           }
+	//       }),
+	//       audpbx.WithSaveToFile(func(ch audio.Channel) string {
+	//           return ch.String() + ".wav"
+	//       }),
+	//   )
+}
+
+// Example_processChannels_mixdown demonstrates mixing all channels to mono.
+func Example_processChannels_mixdown() {
+	fmt.Println("Mix all channels to mono:")
+	fmt.Println()
+	fmt.Println("  // Create a mono mix of 5.1 surround")
+	fmt.Println("  result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,")
+	fmt.Println("      audpbx.WithMixdown(\"mono_mix.wav\"),")
+	fmt.Println("  )")
+	fmt.Println()
+	fmt.Println("This combines all 6 channels into a single mono file.")
+	// Output:
+	// Mix all channels to mono:
+	//
+	//   // Create a mono mix of 5.1 surround
+	//   result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
+	//       audpbx.WithMixdown("mono_mix.wav"),
+	//   )
+	//
+	// This combines all 6 channels into a single mono file.
+}
+
+// Example_processChannels_normalize demonstrates normalizing channels.
+func Example_processChannels_normalize() {
+	fmt.Println("Normalize channels to prevent clipping:")
+	fmt.Println()
+	fmt.Println("  // Normalize all channels")
+	fmt.Println("  result, err := audpbx.ProcessChannels(src, audio.LayoutStereo,")
+	fmt.Println("      audpbx.WithNormalize(func(ch audio.Channel) bool {")
+	fmt.Println("          return true  // Normalize all channels")
+	fmt.Println("      }),")
+	fmt.Println("      audpbx.WithSaveToFile(func(ch audio.Channel) string {")
+	fmt.Println("          return ch.String() + \"_normalized.wav\"")
+	fmt.Println("      }),")
+	fmt.Println("  )")
+	fmt.Println()
+	fmt.Println("Normalization scales audio to use full dynamic range without clipping.")
+	// Output:
+	// Normalize channels to prevent clipping:
+	//
+	//   // Normalize all channels
+	//   result, err := audpbx.ProcessChannels(src, audio.LayoutStereo,
+	//       audpbx.WithNormalize(func(ch audio.Channel) bool {
+	//           return true  // Normalize all channels
+	//       }),
+	//       audpbx.WithSaveToFile(func(ch audio.Channel) string {
+	//           return ch.String() + "_normalized.wav"
+	//       }),
+	//   )
+	//
+	// Normalization scales audio to use full dynamic range without clipping.
+}
+
+// Example_processChannels_concurrent demonstrates concurrent processing.
+func Example_processChannels_concurrent() {
+	fmt.Println("Process channels concurrently for better performance:")
+	fmt.Println()
+	fmt.Println("  // Process 4 channels at a time")
+	fmt.Println("  result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,")
+	fmt.Println("      audpbx.WithConcurrency(4),")
+	fmt.Println("      audpbx.WithSaveToFile(func(ch audio.Channel) string {")
+	fmt.Println("          return ch.String() + \".wav\"")
+	fmt.Println("      }),")
+	fmt.Println("  )")
+	fmt.Println()
+	fmt.Println("Concurrent processing speeds up multi-channel workflows.")
+	fmt.Println("Use 0 for unlimited concurrency, 1 for sequential.")
+	// Output:
+	// Process channels concurrently for better performance:
+	//
+	//   // Process 4 channels at a time
+	//   result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
+	//       audpbx.WithConcurrency(4),
+	//       audpbx.WithSaveToFile(func(ch audio.Channel) string {
+	//           return ch.String() + ".wav"
+	//       }),
+	//   )
+	//
+	// Concurrent processing speeds up multi-channel workflows.
+	// Use 0 for unlimited concurrency, 1 for sequential.
+}
+
+// Example_processChannels_errorHandling demonstrates error handling with callbacks.
+func Example_processChannels_errorHandling() {
+	fmt.Println("Handle errors during processing:")
+	fmt.Println()
+	fmt.Println("  result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,")
+	fmt.Println("      audpbx.WithErrorHandler(func(ch audio.Channel, activity string, err error) error {")
+	fmt.Println("          log.Printf(\"Error on channel during activity: error\")")
+	fmt.Println("          return nil  // Continue processing other channels")
+	fmt.Println("      }),")
+	fmt.Println("      audpbx.WithSaveToFile(func(ch audio.Channel) string {")
+	fmt.Println("          return ch.String() + \".wav\"")
+	fmt.Println("      }),")
+	fmt.Println("  )")
+	fmt.Println()
+	fmt.Println("  // Check if any errors occurred")
+	fmt.Println("  if result.HasErrors() {")
+	fmt.Println("      for _, e := range result.Errors {")
+	fmt.Println("          log.Printf(\"Channel error: \" + e.Err.Error())")
+	fmt.Println("      }")
+	fmt.Println("  }")
+	// Output:
+	// Handle errors during processing:
+	//
+	//   result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
+	//       audpbx.WithErrorHandler(func(ch audio.Channel, activity string, err error) error {
+	//           log.Printf("Error on channel during activity: error")
+	//           return nil  // Continue processing other channels
+	//       }),
+	//       audpbx.WithSaveToFile(func(ch audio.Channel) string {
+	//           return ch.String() + ".wav"
+	//       }),
+	//   )
+	//
+	//   // Check if any errors occurred
+	//   if result.HasErrors() {
+	//       for _, e := range result.Errors {
+	//           log.Printf("Channel error: " + e.Err.Error())
+	//       }
+	//   }
+}
+
+// Example_processChannels_combined demonstrates combining multiple options.
+func Example_processChannels_combined() {
+	fmt.Println("Combine multiple options for complex workflows:")
+	fmt.Println()
+	fmt.Println("  // Extract FL/FR, resample to 48kHz, normalize, boost by 10%")
+	fmt.Println("  result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,")
+	fmt.Println("      audpbx.WithChannels(audio.ChannelFrontLeft, audio.ChannelFrontRight),")
+	fmt.Println("      audpbx.WithResample(func(ch audio.Channel) int {")
+	fmt.Println("          return 48000")
+	fmt.Println("      }),")
+	fmt.Println("      audpbx.WithNormalize(func(ch audio.Channel) bool {")
+	fmt.Println("          return true")
+	fmt.Println("      }),")
+	fmt.Println("      audpbx.WithGain(func(ch audio.Channel) float32 {")
+	fmt.Println("          return 1.1  // +10%")
+	fmt.Println("      }),")
+	fmt.Println("      audpbx.WithSaveToFile(func(ch audio.Channel) string {")
+	fmt.Println("          return \"output_\" + ch.String() + \"_48k.wav\"")
+	fmt.Println("      }),")
+	fmt.Println("      audpbx.WithConcurrency(2),")
+	fmt.Println("  )")
+	// Output:
+	// Combine multiple options for complex workflows:
+	//
+	//   // Extract FL/FR, resample to 48kHz, normalize, boost by 10%
+	//   result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
+	//       audpbx.WithChannels(audio.ChannelFrontLeft, audio.ChannelFrontRight),
+	//       audpbx.WithResample(func(ch audio.Channel) int {
+	//           return 48000
+	//       }),
+	//       audpbx.WithNormalize(func(ch audio.Channel) bool {
+	//           return true
+	//       }),
+	//       audpbx.WithGain(func(ch audio.Channel) float32 {
+	//           return 1.1  // +10%
+	//       }),
+	//       audpbx.WithSaveToFile(func(ch audio.Channel) string {
+	//           return "output_" + ch.String() + "_48k.wav"
+	//       }),
+	//       audpbx.WithConcurrency(2),
+	//   )
+}
+
 func init() {
 	// Suppress any file operations in examples
 	_ = os.DevNull

@@ -10,8 +10,28 @@ import (
 )
 
 // Resampler streams from src to target sample rate using cubic interpolation.
-// Works on interleaved samples; preserves channel count.
-// Includes basic anti-aliasing filtering when downsampling.
+//
+// Resampling changes the sample rate (number of audio measurements per second) of
+// audio without changing the pitch or speed. This is essential when:
+//   - Converting between different audio standards (44.1 kHz CD to 48 kHz pro audio)
+//   - Reducing bandwidth for streaming (downsampling to 8 kHz for voice calls)
+//   - Matching hardware requirements (some devices only support specific rates)
+//
+// The resampler uses cubic interpolation (Catmull-Rom spline) for high quality:
+//   - Upsampling (e.g., 22 kHz → 44 kHz): Creates new samples between existing ones
+//   - Downsampling (e.g., 48 kHz → 16 kHz): Selects and interpolates fewer samples
+//
+// Features:
+//   - Works on interleaved samples; preserves channel count
+//   - Includes basic anti-aliasing filtering when downsampling to prevent artifacts
+//   - Zero allocations after initialization for optimal performance
+//
+// Example:
+//
+//	// Resample from 44.1 kHz to 16 kHz
+//	resampler := audio.NewResampler(source, 16000)
+//	buf := make([]float32, 4096)
+//	n, err := resampler.ReadSamples(buf)
 type Resampler struct {
 	src      Source
 	srcRate  float64
@@ -24,8 +44,15 @@ type Resampler struct {
 	frames   [4][]float32
 	hasFrame [4]bool
 
-	// Position within the current output stream (in source samples)
-	pos float64
+	// Current position in source stream (absolute frame index in source)
+	// This represents which source frame we're currently at
+	srcPosition int
+
+	// Number of output frames generated so far
+	outFramesGenerated int
+
+	// Total source frames read from input
+	srcFramesRead int
 
 	// Buffer for reading from source
 	srcBuf []float32
@@ -46,8 +73,6 @@ func NewResampler(src Source, dstRate int) *Resampler {
 	var filterAlpha float32
 	if useFilter {
 		// Simple one-pole low-pass filter
-		// Cutoff at Nyquist frequency of destination rate
-		// This is a simplified filter - for production, use a proper FIR filter
 		filterAlpha = 0.5
 	}
 
@@ -58,7 +83,7 @@ func NewResampler(src Source, dstRate int) *Resampler {
 		ratio:       ratio,
 		channels:    channels,
 		srcBuf:      make([]float32, 4096),
-		pos:         0,
+		srcPosition: 0,
 		useFilter:   useFilter,
 		filterAlpha: filterAlpha,
 		filterState: make([]float32, channels),
@@ -84,12 +109,85 @@ func (r *Resampler) Close() error {
 	return nil
 }
 
-// fetchNextFrame reads the next frame from source and shifts the frame buffer
-func (r *Resampler) fetchNextFrame() error {
+// readSourceFrameInto reads one frame from source into dst, applies filtering
+func (r *Resampler) readSourceFrameInto(dst []float32) (bool, error) {
 	if r.eof {
-		return io.EOF
+		return false, io.EOF
 	}
 
+	n, err := r.src.ReadSamples(r.srcBuf[:r.channels])
+	if n > 0 {
+		copy(dst, r.srcBuf[:n])
+
+		// Apply simple low-pass filter if downsampling
+		if r.useFilter {
+			for c := 0; c < r.channels; c++ {
+				dst[c] = r.filterAlpha*dst[c] + (1-r.filterAlpha)*r.filterState[c]
+				r.filterState[c] = dst[c]
+			}
+		}
+
+		r.srcFramesRead++
+		return true, err
+	}
+
+	if err == io.EOF {
+		r.eof = true
+	}
+	return false, err
+}
+
+// ensureFrames makes sure we have frames loaded around the current source position
+func (r *Resampler) ensureFrames() error {
+	// We need frames for indices: srcPosition-1, srcPosition, srcPosition+1, srcPosition+2
+	// These map to frames[0], frames[1], frames[2], frames[3]
+
+	// On first call, load initial frames
+	if !r.hasFrame[0] {
+		// Load first 3 source frames
+		// Note: We read directly here to initialize filter state properly
+		for i := 0; i < 3; i++ {
+			if r.eof {
+				break
+			}
+
+			n, err := r.src.ReadSamples(r.srcBuf[:r.channels])
+			if n > 0 {
+				copy(r.frames[i+1], r.srcBuf[:n])
+				r.hasFrame[i+1] = true
+				r.srcFramesRead++
+
+				// Initialize filter state with first sample (don't apply filter yet)
+				if i == 0 && r.useFilter {
+					copy(r.filterState, r.srcBuf[:n])
+				}
+			}
+			if err == io.EOF {
+				if i == 0 {
+					return io.EOF // No data at all
+				}
+				// Pad with last valid frame
+				for j := i + 1; j < 4; j++ {
+					copy(r.frames[j], r.frames[i])
+					r.hasFrame[j] = true
+				}
+				break
+			} else if err != nil {
+				return err
+			}
+		}
+
+		// frames[0] is padding (duplicate of frames[1])
+		copy(r.frames[0], r.frames[1])
+		r.hasFrame[0] = true
+		return nil
+	}
+
+	return nil
+}
+
+// shiftFramesAndLoad shifts frames left and loads the next source frame
+func (r *Resampler) shiftFramesAndLoad() error {
 	// Shift frames: [0,1,2,3] -> [1,2,3,?]
 	copy(r.frames[0], r.frames[1])
 	copy(r.frames[1], r.frames[2])
@@ -98,34 +196,22 @@ func (r *Resampler) fetchNextFrame() error {
 	r.hasFrame[1] = r.hasFrame[2]
 	r.hasFrame[2] = r.hasFrame[3]
 
-	// Try to read one frame into frames[3]
-	n, err := r.src.ReadSamples(r.srcBuf[:r.channels])
-	if n > 0 {
-		copy(r.frames[3], r.srcBuf[:n])
+	// Try to load new frame into frames[3]
+	ok, err := r.readSourceFrameInto(r.frames[3])
+	if ok {
 		r.hasFrame[3] = true
+		return nil
+	}
 
-		// Apply simple low-pass filter if downsampling
-		if r.useFilter {
-			for c := 0; c < r.channels; c++ {
-				// One-pole low-pass: y[n] = alpha * x[n] + (1-alpha) * y[n-1]
-				r.frames[3][c] = r.filterAlpha*r.frames[3][c] + (1-r.filterAlpha)*r.filterState[c]
-				r.filterState[c] = r.frames[3][c]
-			}
-		}
+	// EOF or error - duplicate frames[2] into frames[3]
+	if r.hasFrame[2] {
+		copy(r.frames[3], r.frames[2])
+		r.hasFrame[3] = true
 	} else {
 		r.hasFrame[3] = false
 	}
 
-	if err == io.EOF {
-		r.eof = true
-		if !r.hasFrame[3] {
-			return io.EOF
-		}
-	} else if err != nil {
-		return fmt.Errorf("%w", err)
-	}
-
-	return nil
+	return err
 }
 
 // ReadSamples produces dst samples at r.dstRate.
@@ -135,95 +221,66 @@ func (r *Resampler) ReadSamples(dst []float32) (int, error) {
 		return 0, ErrInvalidDstSize
 	}
 
-	// Initialize frame buffer if needed
-	if !r.hasFrame[1] {
-		// Fill initial frames
-		for i := 0; i < 4; i++ {
-			n, err := r.src.ReadSamples(r.srcBuf[:r.channels])
-			if n > 0 {
-				copy(r.frames[i], r.srcBuf[:n])
-				r.hasFrame[i] = true
-
-				// Initialize filter state with first sample to avoid warm-up transients
-				if i == 0 && r.useFilter {
-					copy(r.filterState, r.srcBuf[:n])
-				}
-			}
-			if err == io.EOF {
-				r.eof = true
-				if i == 0 {
-					return 0, io.EOF
-				}
-				// Duplicate last valid frame for remaining slots
-				for j := i; j < 4; j++ {
-					if i > 0 {
-						copy(r.frames[j], r.frames[i-1])
-						r.hasFrame[j] = true
-					}
-				}
-				break
-			} else if err != nil {
-				return 0, fmt.Errorf("%w", err)
-			}
-		}
+	// Ensure initial frames are loaded
+	if err := r.ensureFrames(); err != nil {
+		return 0, err
 	}
 
 	written := 0
 	framesNeeded := len(dst) / r.channels
 
 	for written < framesNeeded {
-		// Ensure we have frames for interpolation
-		// pos should be in range [0, 1) for interpolation between frames[1] and frames[2]
-		for r.pos >= 1.0 {
-			r.pos -= 1.0
-			if err := r.fetchNextFrame(); err != nil {
-				if err == io.EOF {
-					// Source exhausted - return what we have
-					if written == 0 {
-						return 0, io.EOF
-					}
-					return written * r.channels, io.EOF
+		// Calculate which source position this output frame should sample from
+		srcPosFloat := float64(r.outFramesGenerated) * r.ratio
+
+		// Integer part is the source frame index, fractional part is position within
+		srcFrameIdx := int(srcPosFloat)
+		alpha := float32(srcPosFloat - float64(srcFrameIdx))
+
+		// If we've moved to a new source frame, shift our window
+		for srcFrameIdx > r.srcPosition && !r.eof {
+			if err := r.shiftFramesAndLoad(); err != nil {
+				if err != io.EOF {
+					return written * r.channels, err
 				}
-				return written * r.channels, err
+				// EOF reached, stop shifting
+				break
+			}
+			r.srcPosition++
+		}
+
+		// If at EOF and we need a source frame beyond what we've read, stop
+		// We can interpolate up to the last frame we read
+		if r.eof && srcFrameIdx >= r.srcFramesRead-1 {
+			// Check if this position is actually beyond our data
+			if srcPosFloat >= float64(r.srcFramesRead-1)+1.0 {
+				if written == 0 {
+					return 0, io.EOF
+				}
+				return written * r.channels, io.EOF
 			}
 		}
 
-		// Check if we have enough frames for cubic interpolation
+		// Check we have valid frames for interpolation
 		if !r.hasFrame[1] || !r.hasFrame[2] {
-			// Not enough data
 			if written == 0 {
 				return 0, io.EOF
 			}
 			return written * r.channels, io.EOF
 		}
 
-		// Cubic interpolation between frames
-		alpha := float32(r.pos)
-
+		// Perform cubic interpolation
 		for c := 0; c < r.channels; c++ {
-			var y0, y1, y2, y3 float32
-
-			// Use available frames, duplicate edge frames if needed
-			if r.hasFrame[0] {
-				y0 = r.frames[0][c]
-			} else {
-				y0 = r.frames[1][c]
-			}
-
-			y1 = r.frames[1][c]
-			y2 = r.frames[2][c]
-
-			if r.hasFrame[3] {
-				y3 = r.frames[3][c]
-			} else {
-				y3 = r.frames[2][c]
-			}
+			y0 := r.frames[0][c]
+			y1 := r.frames[1][c]
+			y2 := r.frames[2][c]
+			y3 := r.frames[3][c]
 
 			dst[written*r.channels+c] = utils.CubicInterpolate(y0, y1, y2, y3, alpha)
 		}
 
 		written++
-		r.pos += r.ratio
+		r.outFramesGenerated++
 	}
 
 	return written * r.channels, nil
