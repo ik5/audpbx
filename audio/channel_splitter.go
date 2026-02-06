@@ -177,7 +177,8 @@ func (s *channelSplitter) fill(minPerCh int) {
 					out := &s.outputs[i]
 					out.mu.Lock()
 					if !out.closed {
-						out.push(s.buf[f*s.totalCh+i])
+						// Use chIndex to read from correct position in interleaved data
+						out.push(s.buf[f*s.totalCh+out.chIndex])
 					}
 					out.mu.Unlock()
 				}
@@ -224,7 +225,81 @@ func (s *channelSplitter) closeIfDone() error {
 	return err
 }
 
+// ExtractChannels extracts only the specified channels from src into separate mono Sources.
+// The returned slice contains only the requested channels, in the order specified in 'wanted'.
+//
+// The layout describes the channel mapping of src; if 0, a default is inferred
+// from src.Channels(). Each channel in 'wanted' must be present in the layout.
+//
+// All returned Sources share the underlying src. Channels not in 'wanted' are
+// never created or buffered, preventing memory waste.
+//
+// Example:
+//
+//	channels, err := audio.ExtractChannels(src5_1, audio.Layout5Point1,
+//	    audio.ChannelFrontLeft,
+//	    audio.ChannelFrontRight,
+//	    audio.ChannelBackRight)
+//	// Returns exactly 3 channels: FL, FR, BR
+//	fl := &channels[0]  // FL
+//	fr := &channels[1]  // FR
+//	br := &channels[2]  // BR
+func ExtractChannels(src Source, layout Channel, wanted ...Channel) ([]ChannelSource, error) {
+	if layout == 0 {
+		layout = defaultLayout(src.Channels())
+	}
 
+	if layout.ChannelCount() != src.Channels() {
+		return nil, fmt.Errorf(
+			"layout has %d channels but source has %d",
+			layout.ChannelCount(), src.Channels(),
+		)
+	}
+
+	if len(wanted) == 0 {
+		return nil, fmt.Errorf("no channels specified")
+	}
+
+	totalCh := src.Channels()
+
+	// Build a map of wanted channels for quick lookup
+	wantedMap := make(map[Channel]bool, len(wanted))
+	for _, ch := range wanted {
+		if !layout.Contains(ch) {
+			return nil, fmt.Errorf(
+				"channel %s is not present in layout %s",
+				ch, layout,
+			)
+		}
+		wantedMap[ch] = true
+	}
+
+	// Create output sources in the order specified by 'wanted'
+	sources := make([]ChannelSource, len(wanted))
+	for i, ch := range wanted {
+		chIndex := layout.Index(ch)
+		sources[i] = ChannelSource{
+			chIndex:    chIndex,
+			channel:    ch,
+			sampleRate: src.SampleRate(),
+			bufSize:    src.BufSize() / totalCh,
+		}
+	}
+
+	splitter := &channelSplitter{
+		src:     src,
+		totalCh: totalCh,
+		nOut:    len(sources),
+		outputs: sources,
+	}
+
+	// Link each source to the splitter
+	for i := range sources {
+		sources[i].splitter = splitter
+	}
+
+	return sources, nil
+}
 
 // SplitChannels extracts every channel from src into separate mono Sources.
 // The returned slice is ordered by the channel's bit position (lowest bit first),
