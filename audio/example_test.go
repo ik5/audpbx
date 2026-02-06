@@ -338,3 +338,216 @@ func Example_errorHandling() {
 	// Reached end of audio stream
 	// Successfully processed 1000 samples
 }
+
+// Example_channelLayout demonstrates working with channel layouts and metadata.
+func Example_channelLayout() {
+	// Understanding channel layouts
+	layout := audio.Layout5Point1
+	
+	fmt.Printf("Layout: %s\n", layout)
+	fmt.Printf("Channel count: %d\n", layout.ChannelCount())
+	
+	// Check if layout contains specific channels
+	hasLFE := layout.Contains(audio.ChannelLowFrequency)
+	fmt.Printf("Has subwoofer: %t\n", hasLFE)
+	
+	// Find position of a channel in interleaved data
+	flIndex := layout.Index(audio.ChannelFrontLeft)
+	frIndex := layout.Index(audio.ChannelFrontRight)
+	fmt.Printf("FL index: %d\n", flIndex)
+	fmt.Printf("FR index: %d\n", frIndex)
+	
+	// Output:
+	// Layout: FL|FR|FC|LFE|BL|BR
+	// Channel count: 6
+	// Has subwoofer: true
+	// FL index: 0
+	// FR index: 1
+}
+
+// Example_splitChannels demonstrates splitting all channels from multi-channel audio.
+func Example_splitChannels() {
+	// Create a stereo source
+	source := audiotest.NewSineSource(44100, 2, 44100, 440.0)
+	
+	// Split into individual mono channels
+	channels, layout, err := audio.SplitChannels(source, audio.LayoutStereo)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	
+	fmt.Printf("Layout: %s\n", layout)
+	fmt.Printf("Split into %d channels\n", len(channels))
+	
+	// Each channel is independent
+	fmt.Printf("Channel 0: %s (%d Hz, %d channels)\n", 
+		channels[0].Channel(), channels[0].SampleRate(), channels[0].Channels())
+	fmt.Printf("Channel 1: %s (%d Hz, %d channels)\n",
+		channels[1].Channel(), channels[1].SampleRate(), channels[1].Channels())
+	
+	// Read from left channel
+	buf := make([]float32, 100)
+	n, _ := channels[0].ReadSamples(buf)
+	fmt.Printf("Read %d samples from left channel\n", n)
+	
+	// Output:
+	// Layout: FL|FR
+	// Split into 2 channels
+	// Channel 0: FL (44100 Hz, 1 channels)
+	// Channel 1: FR (44100 Hz, 1 channels)
+	// Read 100 samples from left channel
+}
+
+// Example_extractChannels demonstrates extracting only specific channels.
+func Example_extractChannels() {
+	// Create a 5.1 surround source
+	source := audiotest.NewConstantSource(48000, 6, 48000, 0.5)
+	
+	// Extract only front left, front right, and subwoofer
+	channels, err := audio.ExtractChannels(source, audio.Layout5Point1,
+		audio.ChannelFrontLeft,
+		audio.ChannelFrontRight,
+		audio.ChannelLowFrequency)
+	
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	
+	// You get exactly 3 channels in the order specified
+	fmt.Printf("Extracted %d channels\n", len(channels))
+	fmt.Printf("Channel 0: %s\n", channels[0].Channel())
+	fmt.Printf("Channel 1: %s\n", channels[1].Channel())
+	fmt.Printf("Channel 2: %s\n", channels[2].Channel())
+	
+	// Read from each channel
+	buf := make([]float32, 100)
+	
+	n1, _ := channels[0].ReadSamples(buf) // Front Left
+	n2, _ := channels[1].ReadSamples(buf) // Front Right
+	n3, _ := channels[2].ReadSamples(buf) // Subwoofer
+	
+	fmt.Printf("Read %d + %d + %d samples\n", n1, n2, n3)
+	
+	// Output:
+	// Extracted 3 channels
+	// Channel 0: FL
+	// Channel 1: FR
+	// Channel 2: LFE
+	// Read 100 + 100 + 100 samples
+}
+
+// Example_extractSingleChannel demonstrates extracting just one channel.
+func Example_extractSingleChannel() {
+	// Create a 5.1 source
+	source := audiotest.NewSineSource(48000, 6, 48000, 100.0)
+	
+	// Extract only the subwoofer (LFE) channel
+	channels, err := audio.ExtractChannels(source, audio.Layout5Point1,
+		audio.ChannelLowFrequency)
+	
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	
+	fmt.Printf("Extracted %d channel\n", len(channels))
+	fmt.Printf("Channel: %s\n", channels[0].Channel())
+	
+	// Process only the subwoofer
+	buf := make([]float32, 1024)
+	total := 0
+	
+	for total < 48000 {
+		n, err := channels[0].ReadSamples(buf)
+		total += n
+		if err == io.EOF {
+			break
+		}
+	}
+	
+	fmt.Printf("Processed %d LFE samples\n", total)
+	
+	// Output:
+	// Extracted 1 channel
+	// Channel: LFE
+	// Processed 48000 LFE samples
+}
+
+// Example_channelIdentification shows how to identify which channel is which.
+func Example_channelIdentification() {
+	source := audiotest.NewSilentSource(48000, 6, 1000)
+	
+	// Extract channels in custom order
+	channels, err := audio.ExtractChannels(source, audio.Layout5Point1,
+		audio.ChannelBackRight,
+		audio.ChannelFrontLeft,
+		audio.ChannelFrontCenter)
+	
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	
+	// Method 1: Access by index (in the order you specified)
+	br := &channels[0] // Back Right (first requested)
+	fl := &channels[1] // Front Left (second requested)
+	fc := &channels[2] // Front Center (third requested)
+	
+	fmt.Printf("By index: BR=%s, FL=%s, FC=%s\n", 
+		br.Channel(), fl.Channel(), fc.Channel())
+	
+	// Method 2: Create a map for named access
+	chMap := make(map[audio.Channel]*audio.ChannelSource)
+	for i := range channels {
+		chMap[channels[i].Channel()] = &channels[i]
+	}
+	
+	fmt.Printf("By name: FL=%s, FC=%s, BR=%s\n",
+		chMap[audio.ChannelFrontLeft].Channel(),
+		chMap[audio.ChannelFrontCenter].Channel(),
+		chMap[audio.ChannelBackRight].Channel())
+	
+	// Output:
+	// By index: BR=BR, FL=FL, FC=FC
+	// By name: FL=FL, FC=FC, BR=BR
+}
+
+// Example_channelResampling shows resampling individual channels independently.
+func Example_channelResampling() {
+	// Create a stereo source at 44.1kHz
+	source := audiotest.NewSineSource(44100, 2, 44100, 440.0)
+	
+	// Extract both channels
+	channels, err := audio.ExtractChannels(source, audio.LayoutStereo,
+		audio.ChannelFrontLeft,
+		audio.ChannelFrontRight)
+	
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	
+	// Resample each channel independently to 16kHz
+	leftResampled := audio.NewResampler(&channels[0], 16000)
+	rightResampled := audio.NewResampler(&channels[1], 16000)
+	
+	fmt.Printf("Original: %d Hz, 2 channels\n", source.SampleRate())
+	fmt.Printf("Left resampled: %d Hz, %d channel\n", 
+		leftResampled.SampleRate(), leftResampled.Channels())
+	fmt.Printf("Right resampled: %d Hz, %d channel\n",
+		rightResampled.SampleRate(), rightResampled.Channels())
+	
+	// Read resampled data
+	buf := make([]float32, 1000)
+	nl, _ := leftResampled.ReadSamples(buf)
+	
+	fmt.Printf("Read %d samples from each channel\n", nl)
+	
+	// Output:
+	// Original: 44100 Hz, 2 channels
+	// Left resampled: 16000 Hz, 1 channel
+	// Right resampled: 16000 Hz, 1 channel
+	// Read 1000 samples from each channel
+}
