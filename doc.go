@@ -28,6 +28,31 @@
 //
 //	// samples is now []int16 at 8kHz mono
 //
+// # High-Level Channel Processing
+//
+// For multi-channel audio (stereo, 5.1 surround, etc.), use the high-level API:
+//
+//	// Split stereo into separate mono files
+//	result, _ := audpbx.ProcessChannels(src, audio.LayoutStereo,
+//	    audpbx.WithSaveToFile(func(ch audio.Channel) string {
+//	        return fmt.Sprintf("%s.wav", ch)
+//	    }))
+//
+//	// Process with resampling and gain adjustment
+//	result, _ := audpbx.ProcessChannels(src, audio.Layout5Point1,
+//	    audpbx.WithChannels(audio.ChannelFrontLeft, audio.ChannelFrontRight),
+//	    audpbx.WithResample(func(ch audio.Channel) int { return 48000 }),
+//	    audpbx.WithGain(func(ch audio.Channel) float32 { return 1.5 }),
+//	    audpbx.WithSaveToFile(func(ch audio.Channel) string {
+//	        return fmt.Sprintf("output_%s_48k.wav", ch)
+//	    }))
+//
+// Common audio processing options:
+//   - Resample: Change sample rate (e.g., 44.1 kHz to 16 kHz)
+//   - Gain: Adjust volume (1.0 = no change, 2.0 = double, 0.5 = half)
+//   - Normalize: Automatically maximize volume without distortion
+//   - Mixdown: Combine multiple channels into mono
+//
 // # Audio Processing Pipeline
 //
 // For more control, you can build custom audio processing pipelines using the
@@ -74,12 +99,48 @@
 //	file, _ := os.Create("output.wav")
 //	wav.WriteWAV16(file, 8000, samples)
 //
+// # Audio Terms Glossary
+//
+// For those new to audio processing, here are key terms used in this package:
+//
+// Sample Rate (Hz): How many times per second audio is measured. Higher rates
+// capture more detail but use more storage. Common rates:
+//   - 8000 Hz: Telephone quality (minimum for speech)
+//   - 16000 Hz: Wideband speech (better quality calls)
+//   - 44100 Hz: CD quality (music standard)
+//   - 48000 Hz: Professional audio/video
+//
+// Channels: Independent audio streams in multi-channel audio:
+//   - Mono (1): Single channel (one speaker)
+//   - Stereo (2): Two channels (left and right speakers)
+//   - 5.1 Surround (6): Front-left, front-right, center, subwoofer, back-left, back-right
+//
+// Resampling: Changing the sample rate without affecting pitch or speed.
+// Used to convert between different audio standards or reduce bandwidth.
+//
+// Gain: Volume multiplier (1.0 = original, 2.0 = double, 0.5 = half).
+// Applied by multiplying each sample by the gain value.
+//
+// Normalization: Automatically adjusting volume to use the full available
+// dynamic range without clipping. Finds the loudest point and scales everything
+// proportionally so that point reaches (but doesn't exceed) the maximum.
+//
+// Mixdown/Downmixing: Combining multiple channels into fewer channels (usually mono)
+// by averaging. For example, stereo to mono: output = (left + right) / 2.
+//
+// Clipping: Distortion that occurs when audio becomes too loud and exceeds
+// the maximum representable value. Sounds harsh and should be avoided.
+//
+// Interpolation: Creating new sample values between existing ones when
+// upsampling. This package uses cubic interpolation for smooth, high-quality results.
+//
 // # Performance
 //
 // The package is optimized for performance with minimal allocations:
 //   - Resampling uses cubic interpolation for quality
 //   - Buffer reuse minimizes GC pressure
 //   - Batch conversions reduce per-sample overhead
+//   - Zero allocations in steady state for most operations
 //
 // See the individual subpackages for more detailed documentation.
 package audpbx
