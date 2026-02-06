@@ -81,28 +81,28 @@ func (cs *ChannelSource) ReadSamples(dst []float32) (int, error) {
 		return 0, io.EOF
 	}
 
-	n := copy(dst, cs.drain(len(dst)))
+	n := cs.drainInto(dst)
 	if cs.count == 0 && cs.eof {
 		return n, io.EOF
 	}
 	return n, nil
 }
 
-// drain returns up to max samples from the ring buffer without locking.
+// drainInto copies up to len(dst) samples from the ring buffer into dst.
+// Returns the number of samples copied.
 // Caller must hold cs.mu.
-func (cs *ChannelSource) drain(max int) []float32 {
+func (cs *ChannelSource) drainInto(dst []float32) int {
 	if cs.count == 0 {
-		return nil
+		return 0
 	}
-	n := min(cs.count, max)
+	n := min(cs.count, len(dst))
 
-	out := make([]float32, n)
 	for i := range n {
-		out[i] = cs.ring[cs.rPos]
+		dst[i] = cs.ring[cs.rPos]
 		cs.rPos = (cs.rPos + 1) % len(cs.ring)
 	}
 	cs.count -= n
-	return out
+	return n
 }
 
 // push appends a sample to this channel's ring buffer.
@@ -257,32 +257,33 @@ func SplitChannels(src Source, layout Channel) ([]ChannelSource, Channel, error)
 
 	totalCh := src.Channels()
 
+	// Pre-allocate based on channel count
+	sources := make([]ChannelSource, 0, totalCh)
+
 	// Enumerate which channels are present, in bit order.
-	var chList []Channel
 	for bit := Channel(1); bit != 0; bit <<= 1 {
 		if layout&bit != 0 {
-			chList = append(chList, bit)
+			sources = append(sources, ChannelSource{
+				chIndex:    len(sources),
+				channel:    bit,
+				sampleRate: src.SampleRate(),
+				bufSize:    src.BufSize() / totalCh,
+			})
 		}
 	}
 
 	splitter := &channelSplitter{
 		src:     src,
 		totalCh: totalCh,
-		nOut:    len(chList),
+		nOut:    len(sources),
+		outputs: sources,
 	}
 
-	sources := make([]ChannelSource, len(chList))
-	for i, ch := range chList {
-		sources[i] = ChannelSource{
-			splitter:   splitter,
-			chIndex:    i,
-			channel:    ch,
-			sampleRate: src.SampleRate(),
-			bufSize:    src.BufSize() / totalCh,
-		}
+	// Link each source to the splitter
+	for i := range sources {
+		sources[i].splitter = splitter
 	}
 
-	splitter.outputs = sources
 	return sources, layout, nil
 }
 
