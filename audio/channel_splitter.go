@@ -226,15 +226,23 @@ func (s *channelSplitter) closeIfDone() error {
 }
 
 // ExtractChannels extracts only the specified channels from src into separate mono Sources.
-// The returned slice contains only the requested channels, in the order specified in 'wanted'.
 //
+// Channels are independent audio streams in multi-channel audio. For example:
+//   - Stereo: 2 channels (left speaker, right speaker)
+//   - 5.1 surround: 6 channels (front-left, front-right, center, subwoofer, back-left, back-right)
+//
+// This function separates the interleaved multi-channel audio into individual mono
+// sources for each requested channel, allowing you to process each channel independently.
+//
+// The returned slice contains only the requested channels, in the order specified in 'wanted'.
 // The layout describes the channel mapping of src; if 0, a default is inferred
 // from src.Channels(). Each channel in 'wanted' must be present in the layout.
 //
 // All returned Sources share the underlying src. Channels not in 'wanted' are
-// never created or buffered, preventing memory waste.
+// never created or buffered, preventing memory waste - only the channels you
+// request are extracted and stored.
 //
-// Example:
+// Example - extract only front speakers from 5.1 surround:
 //
 //	channels, err := audio.ExtractChannels(src5_1, audio.Layout5Point1,
 //	    audio.ChannelFrontLeft,

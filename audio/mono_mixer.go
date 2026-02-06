@@ -4,11 +4,32 @@ package audio
 
 import "fmt"
 
+// MonoMixer converts multi-channel audio to mono by averaging all channels.
+//
+// Mono audio has a single channel, while multi-channel audio (stereo, surround)
+// has multiple independent channels. This mixer combines them into one channel
+// by averaging, which is useful when:
+//   - You need single-channel audio for voice processing
+//   - Reducing file size (mono is smaller than stereo)
+//   - Targeting mono playback systems (some phones, intercoms)
+//
+// How it works:
+//   - Stereo (2 ch): output = (left + right) / 2
+//   - 5.1 (6 ch): output = (FL + FR + FC + LFE + BL + BR) / 6
+//
+// Example mixing stereo to mono:
+//   Input: L=[0.8, 0.4], R=[0.2, 0.6]
+//   Output: [(0.8+0.2)/2, (0.4+0.6)/2] = [0.5, 0.5]
+//
+// The mixer is efficient and performs no allocations after initialization
+// when using reasonable buffer sizes.
 type MonoMixer struct {
     src      Source
     tmp      []float32
 }
 
+// NewMonoMixer creates a mixer that converts src to mono.
+// If src is already mono, samples pass through unchanged.
 func NewMonoMixer(src Source) *MonoMixer {
     return &MonoMixer{
         src: src,

@@ -10,8 +10,28 @@ import (
 )
 
 // Resampler streams from src to target sample rate using cubic interpolation.
-// Works on interleaved samples; preserves channel count.
-// Includes basic anti-aliasing filtering when downsampling.
+//
+// Resampling changes the sample rate (number of audio measurements per second) of
+// audio without changing the pitch or speed. This is essential when:
+//   - Converting between different audio standards (44.1 kHz CD to 48 kHz pro audio)
+//   - Reducing bandwidth for streaming (downsampling to 8 kHz for voice calls)
+//   - Matching hardware requirements (some devices only support specific rates)
+//
+// The resampler uses cubic interpolation (Catmull-Rom spline) for high quality:
+//   - Upsampling (e.g., 22 kHz → 44 kHz): Creates new samples between existing ones
+//   - Downsampling (e.g., 48 kHz → 16 kHz): Selects and interpolates fewer samples
+//
+// Features:
+//   - Works on interleaved samples; preserves channel count
+//   - Includes basic anti-aliasing filtering when downsampling to prevent artifacts
+//   - Zero allocations after initialization for optimal performance
+//
+// Example:
+//
+//	// Resample from 44.1 kHz to 16 kHz
+//	resampler := audio.NewResampler(source, 16000)
+//	buf := make([]float32, 4096)
+//	n, err := resampler.ReadSamples(buf)
 type Resampler struct {
 	src      Source
 	srcRate  float64
