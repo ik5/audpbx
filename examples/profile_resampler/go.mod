@@ -1,6 +1,6 @@
 module github.com/ik5/audpbx/examples/profile_resampler
 
-go 1.25.7
+go 1.25.5
 
 replace github.com/ik5/audpbx => ../..
 
