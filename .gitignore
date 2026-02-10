@@ -1,3 +1,8 @@
 *output*.wav
 examples/resampler/resampler
 .claude/*.json
+
+
+# large files goes here
+examples/testdata/844152__kevp888__020a_100111_0243_exp02_bells_drone.aiff
+examples/testdata/844152__kevp888__020a_100111_0243_exp02_bells_drone.wav
