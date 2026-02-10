@@ -1,6 +1,6 @@
 *output*.wav
 examples/resampler/resampler
-.claude/*.json
+.claude/*
 
 
 # large files goes here
