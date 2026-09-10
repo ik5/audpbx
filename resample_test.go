@@ -5,6 +5,7 @@ package audpbx
 import (
 	"io"
 	"math"
+	"runtime"
 	"testing"
 
 	"github.com/ik5/audpbx/internal/audiotest"
@@ -251,5 +252,71 @@ func BenchmarkResampleToMono16_Upsample(b *testing.B) {
 	for b.Loop() {
 		src := audiotest.NewSineSource(8000, 2, 8000, 440.0)
 		_, _, _ = ResampleToMono16(src, 44100, 4096)
+	}
+}
+
+// TestResampleToMono16_AllocsDoNotScaleWithLength checks that the pipeline's
+// allocation count is independent of how long the input is.
+//
+// This is the end-to-end guard for the class of defect that made this pipeline
+// 40x slower than ffmpeg: an allocation on a per-frame or per-call path, which
+// is invisible in a correctness test and barely visible by allocated bytes,
+// but grows without bound as input length grows.
+//
+// It deliberately measures counts rather than time, so it is deterministic and
+// cannot flake on a loaded machine. Growth is expected to be logarithmic, since
+// the output slice doubles as it fills, so the assertion allows a small
+// additive increase but nothing proportional to length.
+//
+// Note that this catches an allocating layer anywhere in the chain — decoder,
+// resampler, mixer, or converter. It does not catch a resampler that reads its
+// source in tiny chunks without allocating; audio.TestResampler_ReadsSourceInBlocks
+// covers that.
+func TestResampleToMono16_AllocsDoNotScaleWithLength(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping allocation test in short mode")
+	}
+
+	const (
+		shortFrames = 44100 // 1 second at 44.1 kHz
+		lengthRatio = 10    // the long input is this many times longer
+		allowance   = 8     // room for the output slice doubling as it grows
+	)
+
+	countAllocs := func(frames int) uint64 {
+		var before, after runtime.MemStats
+
+		// Settle any garbage from setup before taking the baseline.
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+
+		src := audiotest.NewSineSource(44100, 2, frames, 440.0)
+
+		pcm16, _, err := ResampleToMono16(src, 8000, 4096)
+		if err != nil {
+			t.Fatalf("ResampleToMono16() error = %v", err)
+		}
+
+		runtime.ReadMemStats(&after)
+
+		// Keep the result alive so it cannot be optimised away.
+		if len(pcm16) == 0 {
+			t.Fatal("ResampleToMono16() produced no samples")
+		}
+
+		return after.Mallocs - before.Mallocs
+	}
+
+	shortAllocs := countAllocs(shortFrames)
+	longAllocs := countAllocs(shortFrames * lengthRatio)
+
+	t.Logf("%d frames: %d allocations; %d frames: %d allocations",
+		shortFrames, shortAllocs, shortFrames*lengthRatio, longAllocs)
+
+	if longAllocs > shortAllocs+allowance {
+		t.Errorf("allocations grew from %d to %d when the input got %dx longer"+
+			" (allowance %d); something on the hot path allocates per frame or"+
+			" per read",
+			shortAllocs, longAllocs, lengthRatio, allowance)
 	}
 }

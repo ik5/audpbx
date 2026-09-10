@@ -690,3 +690,86 @@ func TestResampler_IdentityRateIsExact(t *testing.T) {
 		}
 	}
 }
+
+// countingSource wraps a Source and records how it was read.
+type countingSource struct {
+	Source
+
+	calls           int
+	maxRequestedLen int
+}
+
+func (c *countingSource) ReadSamples(dst []float32) (int, error) {
+	c.calls++
+	if len(dst) > c.maxRequestedLen {
+		c.maxRequestedLen = len(dst)
+	}
+
+	return c.Source.ReadSamples(dst)
+}
+
+// TestResampler_ReadsSourceInBlocks pins the property that makes this package
+// usable: the resampler must pull its source in large blocks, not frame by
+// frame.
+//
+// This is the guard for the defect that made a 103 second file take 6.9
+// seconds to resample instead of 59 ms. Reading one frame at a time meant one
+// Source.ReadSamples call per audio frame, and underneath it one read(2)
+// syscall per 4 bytes, so per-call overhead swamped the arithmetic.
+//
+// Nothing else in the suite catches this. Correctness is unaffected by the
+// block size, so the output-comparison tests stay green; and the decoders reuse
+// their staging buffers, so the allocation tests stay green too. Only the call
+// pattern gives it away, which is what this test inspects.
+func TestResampler_ReadsSourceInBlocks(t *testing.T) {
+	t.Parallel()
+
+	const (
+		channels = 2
+		frames   = 50000
+
+		// The resampler must ask for at least this many frames in a single
+		// read. Well below resamplerBlockFrames, so tuning the block size does
+		// not break the test, but far above the frame-at-a-time regression.
+		minBlockFrames = 512
+
+		// And it must get through the stream in far fewer calls than there are
+		// frames. Generous enough to tolerate short reads from the source.
+		maxCallsPerFrame = 64
+	)
+
+	src := &countingSource{Source: newSineSource(44100, channels, frames, 440.0)}
+
+	resampler := NewResampler(src, 8000)
+	buf := make([]float32, 4096)
+
+	for {
+		_, err := resampler.ReadSamples(buf)
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			t.Fatalf("ReadSamples() error = %v", err)
+		}
+	}
+
+	if src.calls == 0 {
+		t.Fatal("resampler never read from its source")
+	}
+
+	if gotFrames := src.maxRequestedLen / channels; gotFrames < minBlockFrames {
+		t.Errorf("largest source read was %d frames, want at least %d;"+
+			" the resampler appears to be reading frame-at-a-time",
+			gotFrames, minBlockFrames)
+	}
+
+	if maxCalls := frames / maxCallsPerFrame; src.calls > maxCalls {
+		t.Errorf("resampler made %d source reads for %d frames, want at most %d;"+
+			" per-call overhead will dominate at this rate",
+			src.calls, frames, maxCalls)
+	}
+
+	t.Logf("%d source reads for %d frames, largest read %d frames",
+		src.calls, frames, src.maxRequestedLen/channels)
+}

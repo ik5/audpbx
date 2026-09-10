@@ -666,3 +666,111 @@ func BenchmarkSource_ReadSamples_Stereo(b *testing.B) {
 		_, _ = src.ReadSamples(dst)
 	}
 }
+
+// TestSource_ReadSamples_NeverOverruns checks the Source contract that a read
+// never reports more values than the caller's buffer can hold.
+//
+// This is the guard for a real defect: oggvorbis.Reader.Read returns a count of
+// *values* (frames * channels), but the decoder multiplied that by the channel
+// count again before returning it. At the two-sample reads the rest of these
+// tests used, the two errors cancelled out; at realistic buffer sizes it
+// panicked with "slice bounds out of range".
+//
+// Large buffers are the important case here, so they are covered explicitly.
+func TestSource_ReadSamples_NeverOverruns(t *testing.T) {
+	t.Parallel()
+
+	for _, channels := range []int{1, 2, 6} {
+		samples := make([]float32, 8192*channels)
+		for i := range samples {
+			samples[i] = float32(i%1000) / 1000.0
+		}
+
+		for _, size := range []int{
+			channels, 2 * channels, 64, 1024, 4096, 8192, 16384,
+		} {
+			src := &source{
+				dec: &mockOggVorbisReader{
+					sampleRate: 44100,
+					channels:   channels,
+					samples:    samples,
+				},
+				sampleRate: 44100,
+				channels:   channels,
+				bufSize:    4096,
+			}
+
+			dst := make([]float32, size)
+
+			n, err := src.ReadSamples(dst)
+			if err != nil && err != io.EOF {
+				t.Fatalf("channels=%d size=%d: ReadSamples() error = %v",
+					channels, size, err)
+			}
+
+			if n > len(dst) {
+				t.Fatalf("channels=%d size=%d: ReadSamples() returned n = %d,"+
+					" more than the buffer holds", channels, size, n)
+			}
+
+			if n%channels != 0 {
+				t.Errorf("channels=%d size=%d: ReadSamples() returned n = %d,"+
+					" not a whole number of frames", channels, size, n)
+			}
+		}
+	}
+}
+
+// TestSource_ReadSamples_DrainsFullStream checks that reading to EOF yields
+// every sample exactly once, in order, at a realistic buffer size.
+func TestSource_ReadSamples_DrainsFullStream(t *testing.T) {
+	t.Parallel()
+
+	const channels = 2
+
+	samples := make([]float32, 5000*channels)
+	for i := range samples {
+		samples[i] = float32(i) / float32(len(samples))
+	}
+
+	src := &source{
+		dec: &mockOggVorbisReader{
+			sampleRate: 44100,
+			channels:   channels,
+			samples:    samples,
+		},
+		sampleRate: 44100,
+		channels:   channels,
+		bufSize:    4096,
+	}
+
+	var got []float32
+	dst := make([]float32, 4096)
+
+	for {
+		n, err := src.ReadSamples(dst)
+		got = append(got, dst[:n]...)
+
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			t.Fatalf("ReadSamples() error = %v", err)
+		}
+
+		if n == 0 {
+			t.Fatal("ReadSamples() made no progress and did not report EOF")
+		}
+	}
+
+	if len(got) != len(samples) {
+		t.Fatalf("read %d values in total, want %d", len(got), len(samples))
+	}
+
+	for i := range samples {
+		if got[i] != samples[i] {
+			t.Fatalf("value %d = %v, want %v", i, got[i], samples[i])
+		}
+	}
+}
