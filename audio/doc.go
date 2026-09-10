@@ -31,7 +31,26 @@
 //	buf := make([]float32, 4096)
 //	n, err := resampler.ReadSamples(buf)
 //
-// Resampling works for both upsampling and downsampling with high quality.
+// Resampling works for both upsampling and downsampling.
+//
+// The resampler pulls from its source in large blocks rather than frame by
+// frame. This is what keeps it fast: a decoder sitting on an unbuffered file
+// costs a syscall and several allocations per call, so reading a frame at a
+// time makes that overhead, not the arithmetic, the dominant cost. Because of
+// this, the size of the buffer passed to ReadSamples has very little effect on
+// throughput, and ReadSamples allocates nothing once streaming has started.
+//
+// Treat the block reads as load-bearing rather than incidental. Reducing the
+// block size costs roughly 40x throughput while changing neither the output nor
+// the allocation count, so nothing but a call-pattern check notices. That check
+// is TestResampler_ReadsSourceInBlocks; if you restructure how the source is
+// read, make sure it still holds.
+//
+// When downsampling, a one-pole low-pass filter is applied for anti-aliasing.
+// Be aware that its coefficient is fixed rather than derived from the
+// resampling ratio, so at large ratios it attenuates considerably less than a
+// proper decimation filter and content above the output Nyquist frequency will
+// alias. See the package-level Limitations note in the parent audpbx package.
 //
 // # Channel Mixing
 //
@@ -65,15 +84,20 @@
 //
 // # Performance Considerations
 //
-// The audio processing functions are optimized for performance:
-//   - Minimal allocations (often zero after warmup)
-//   - Efficient buffer management
-//   - SIMD-friendly algorithms where possible
+// Resampler and MonoMixer both allocate nothing per call once running; their
+// only allocations are one-time setup in the constructor. Sources are read in
+// large blocks so that per-call decoder overhead is amortised.
 //
 // For best performance:
-//   - Reuse buffers when possible
-//   - Use appropriate buffer sizes (4096 is a good default)
+//   - Reuse buffers rather than allocating inside a read loop
 //   - Process audio in streaming fashion rather than loading all in memory
+//   - Do not bother tuning the buffer size for the resampler; it reads its
+//     source in fixed internal blocks either way. DefaultBufSize is fine.
+//
+// Note that a Resampler tracks its own end-of-stream state and is not
+// reusable across streams. Construct a new one per stream; resetting the
+// underlying source is not enough, and in a benchmark loop it will make every
+// iteration after the first return io.EOF immediately.
 //
 // # Error Handling
 //

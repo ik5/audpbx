@@ -1,179 +1,208 @@
 # Quick Debug Reference
 
-## 🚀 Run These Commands First
+Command reference for profiling the resampling pipeline. For why the pipeline
+looks the way it does, read [PROFILING_GUIDE.md](PROFILING_GUIDE.md).
 
-### 1. Basic Performance Check
+## Run these first
+
+### 1. Pipeline benchmark against real files
+
+The measurement that matters. An in-memory source cannot see decoder call
+overhead or I/O, which is where this pipeline's problems have historically been.
+
+```bash
+go test ./internal/perfbench/ -bench . -benchtime 5x -benchmem
+```
+
+### 2. CPU profile
+
+```bash
+go test ./internal/perfbench/ -run XXX -bench . -benchtime 1x -cpuprofile cpu.prof
+
+go tool pprof -top -nodecount=25 cpu.prof
+go tool pprof -http=:8080 cpu.prof          # flame graph, best view
+```
+
+Command-line exploration:
+
+```bash
+go tool pprof cpu.prof
+> top20
+> top -cum
+> list ReadSamples
+> peek PCMBuffer$
+> web                                        # visual graph, needs graphviz
+```
+
+### 3. Memory profile
+
+Use `alloc_objects`, not just `alloc_space`. A 4-byte allocation per call is
+invisible by size and glaring by count.
+
+```bash
+go test ./internal/perfbench/ -run XXX -bench . -benchtime 1x -memprofile mem.prof
+
+go tool pprof -sample_index=alloc_objects -top mem.prof
+go tool pprof -sample_index=alloc_space   -top mem.prof
+```
+
+### 4. Single file, stage breakdown
+
 ```bash
 cd examples/profile_resampler
-go run main.go Daniel_Bautista_-_Capricerie_No._5_\(Bach\,_Paganini\).wav output.wav
+go run main.go ../testdata/Daniel_Bautista_-_Capricerie_No._5_\(Bach\,_Paganini\).wav out.wav
 ```
 
-Look for the "MAIN PROCESSING" line - this is your bottleneck time.
+### 5. Component benchmarks
 
-### 2. CPU Profile (Most Important!)
+For comparing two versions of an inner loop. These use an in-memory source and
+will not reveal pipeline bottlenecks.
+
 ```bash
-go run main.go Daniel_Bautista_-_Capricerie_No._5_\(Bach\,_Paganini\).wav output.wav --cpu-profile=cpu.prof
-
-# View in browser (best option)
-go tool pprof -http=:8080 cpu.prof
-
-# Or command line
-go tool pprof cpu.prof
-> top10
-> list ResampleToMono16
-> list CubicInterpolate
-> web  # shows visual graph (requires graphviz)
-```
-
-### 3. Benchmark Individual Components
-```bash
-# Run all benchmarks
-go test -bench=. -benchmem -cpuprofile=bench_cpu.prof
-
-# Just cubic interpolation
+cd examples/profile_resampler
+go test -bench=. -benchmem
 go test -bench=BenchmarkCubicInterpolate -benchmem
-
-# Just resampler
-go test -bench=BenchmarkResampler -benchmem
-
-# Test different buffer sizes
 go test -bench=BenchmarkBufferSize -benchmem
 ```
 
-### 4. Memory Profile
-```bash
-go run main.go your_file.wav output.wav --mem-profile=mem.prof
-go tool pprof -http=:8080 mem.prof
-```
+## Expected numbers
 
-## 🔍 What to Look For
+103 second 44.1 kHz stereo source to 8 kHz mono, Intel i7-6820HQ:
 
-### In CPU Profile (pprof)
+| Format | audpbx    | ffmpeg | allocations |
+|--------|-----------|--------|-------------|
+| WAV    | **59 ms** | 166 ms | 71          |
+| AIFF   | **58 ms** | 151 ms | 70          |
+| Ogg    | 467 ms    | 213 ms | 58 K        |
+| MP3    | 2043 ms   | 198 ms | 552 K       |
 
-**Expected hotspots:**
-1. `CubicInterpolate` - Should be #1 (interpolation math)
-2. `Resampler.ReadSamples` - Frame management
-3. `wav.source.ReadSamples` - Int→Float conversion
-4. `MonoMixer.ReadSamples` - Channel mixing
+WAV and AIFF are faster than ffmpeg. MP3 and Ogg are bound inside the
+third-party codecs (`go-mp3`, `jfreymuth/vorbis`), not in this library.
 
-**Red flags:**
-- GC functions in top 10 (means too many allocations)
-- syscall functions (means I/O blocking)
-- Unexpected functions in hot path
+If WAV is not in the tens of milliseconds for a file of this size, something has
+regressed. Check the red flags below.
 
-### In Benchmark Results
+## What to look for
 
-```
-BenchmarkCubicInterpolate-8    50000000    25.3 ns/op
-```
-- Lower ns/op = better
-- Compare buffer sizes: larger should have fewer ns/op per sample
+### Red flags
 
-### In Profile Output
+| Symptom | Almost certainly means | Test that should have caught it |
+|---|---|---|
+| `Syscall6` high in the CPU profile | Reads are too small — something is pulling frame-at-a-time | `audio.TestResampler_ReadsSourceInBlocks` |
+| Allocation count scales with frame count | A per-sample or per-frame allocation crept into the hot path | `TestResampleToMono16_AllocsDoNotScaleWithLength` |
+| `go-audio/wav.PCMBuffer` in the profile | The WAV direct-decode path was bypassed | `wav.TestSource_ReadSamples_ZeroAllocsSteadyState` |
+| `go-audio/aiff.PCMBuffer` in the profile | The AIFF direct-decode path was bypassed | `aiff.TestSource_ReadSamples_RawZeroAllocsSteadyState` |
+| `GC` functions in the top ten | Allocation pressure in the loop | the two allocation tests above |
 
-```
-=== Performance Breakdown ===
-Resample/Mix:    2847.234 ms (94.8%) ← MAIN PROCESSING
-```
-- This should be 90%+ of total time
-- If not, check file I/O or decode issues
-
-## 🛠️ Common Fixes
-
-### If CubicInterpolate is the bottleneck:
-1. **Try linear interpolation** (trade quality for speed)
-2. Consider SIMD optimization
-3. Profile with different sample rates
-
-### If ReadSamples calls are slow:
-1. **Increase buffer size**: Try 8192 or 16384
-2. Check memory allocations
-3. Look for slice growth
-
-### If decoder is slow:
-1. Check if file is being read multiple times
-2. Look at buffer sizes in decoder
-3. Consider different WAV library
-
-### If GC is frequent:
-1. Pre-allocate larger initial slices
-2. Reduce buffer copies
-3. Reuse buffers
-
-## 📊 Quick Comparison Test
-
-Test with different settings:
+If you are looking at a profile because throughput regressed, run the tests
+first — one of them probably already names the cause:
 
 ```bash
-# Baseline
-time go run main.go input.wav output1.wav
-
-# With profiling overhead (should be similar)
-time go run profile_main.go input.wav output2.wav
-
-# Try modifying buffer size in code (change 4096 to 8192)
-# Edit main.go line with ResampleToMono16(..., 8192)
-time go run main.go input.wav output3.wav
+go test -run 'ReadsSourceInBlocks|AllocsDoNotScale|ZeroAllocsSteadyState' ./...
 ```
 
-## 🎯 Expected Numbers for Your Files
+### Healthy shape
 
-**1.6 MB file:**
-- Current: ~3 seconds
-- Target: <0.5 seconds (6x faster)
-- Best case: ~0.1 seconds (30x faster)
+- `Resampler.ReadSamples` allocates nothing in steady state
+- Allocation count is proportional to *blocks*, not frames
+- For MP3 and Ogg the codec's own DSP is on top; that is expected
 
-**96 MB file:**
-- Current: ~40 seconds  
-- Target: <10 seconds (4x faster)
-- Best case: ~2 seconds (20x faster)
+## Common fixes
 
-## 📝 Zed Editor Integration
+### Reads look too small
 
-### Run from Zed Terminal
-```bash
-# Open terminal in Zed (Ctrl+`)
-cd examples/profile_resampler
-go run main.go ../../testdata/your_file.wav output.wav
+Check `resamplerBlockFrames` in `audio/resampler.go`. The resampler must pull
+its source in blocks; one frame per call reintroduces the original 40x
+slowdown.
+
+### Output buffer size
+
+Largely irrelevant now, and worth knowing so you do not chase it. The resampler
+reads its source in fixed blocks regardless of the caller's buffer, so a 64
+sample buffer and a 4096 sample buffer measure the same:
+
+```
+BenchmarkResampler_SmallBuffer-8    4899766 ns/op   # 64-sample buffer
+BenchmarkResampler_Downsample-8     4972946 ns/op   # 4096-sample buffer
 ```
 
-### Debug with Delve in Zed
+### Benchmark reports an implausibly small number
+
+A `Resampler` keeps its own end-of-stream state. If you construct one outside
+the timed loop and reset only the source, every iteration after the first
+returns `io.EOF` immediately:
+
+```go
+// WRONG: times an early return, reported ~36 ns/op for 100K frames
+resampler := NewResampler(src, 8000)
+for b.Loop() {
+    src.Reset()
+    for { _, err := resampler.ReadSamples(buf); if err == io.EOF { break } }
+}
+
+// RIGHT: construct inside the loop
+for b.Loop() {
+    src.Reset()
+    resampler := NewResampler(src, 8000)
+    for { _, err := resampler.ReadSamples(buf); if err != nil { break } }
+}
+```
+
+## Comparing against ffmpeg
+
 ```bash
-# Build first
-go build -o resampler_debug main.go
+time ffmpeg -v error -i input.wav -ar 8000 -ac 1 -c:a pcm_s16le -y ff.wav
+time go run ./examples/resampler input.wav ours.wav 8000
+```
 
-# Debug
-dlv exec ./resampler_debug -- your_file.wav output.wav
+Check anti-aliasing quality too, not just speed. A tone above the output Nyquist
+should disappear:
 
-# Set breakpoints
-(dlv) break resample.go:45
+```bash
+ffmpeg -v error -f lavfi -i "sine=frequency=6000:sample_rate=44100:duration=5" \
+    -ac 2 -c:a pcm_s16le -y tone6k.wav
+go run ./examples/resampler tone6k.wav ours8k.wav 8000
+ffmpeg -hide_banner -i ours8k.wav -af volumedetect -f null - 2>&1 | grep mean_volume
+```
+
+Currently about −27.9 dB where ffmpeg reaches −73.7 dB. See the quality note in
+[PROFILING_GUIDE.md](PROFILING_GUIDE.md).
+
+## Comparing two revisions
+
+To confirm a change did not alter output, diff the bytes rather than trusting a
+listen:
+
+```bash
+go run ./examples/resampler in.wav before.wav 8000
+# apply the change
+go run ./examples/resampler in.wav after.wav 8000
+cmp before.wav after.wav && echo "bit-identical"
+```
+
+For profiles:
+
+```bash
+go tool pprof -base=before.prof after.prof
+```
+
+## Debugging with delve
+
+```bash
+go install github.com/go-delve/delve/cmd/dlv@latest
+
+go build -o resampler_debug ./examples/resampler
+dlv exec ./resampler_debug -- input.wav output.wav 8000
+
+(dlv) break audio/resampler.go:pull
 (dlv) continue
-(dlv) print n
-(dlv) next
+(dlv) print r.inFrames
+(dlv) print r.inBase
 ```
 
-### View CPU Profile in Browser
-```bash
-go run main.go input.wav output.wav --cpu-profile=cpu.prof
-go tool pprof -http=localhost:8080 cpu.prof
-# Open http://localhost:8080 in browser
-# Click "View" → "Flame Graph" for best visualization
-```
+## Execution trace
 
-## 🔬 Advanced: Trace Execution
-
-For detailed execution trace:
 ```bash
-go test -trace=trace.out -bench=BenchmarkFullPipeline
+go test ./internal/perfbench/ -run XXX -bench BenchmarkPipelineWAV -benchtime 1x -trace trace.out
 go tool trace trace.out
-# Opens interactive trace viewer in browser
 ```
-
-## 📞 Need Help?
-
-1. Share your `top10` output from pprof
-2. Share the "Performance Breakdown" from profile_main.go
-3. Mention your CPU model for context
-4. Note: 0.53 MB/s is ~100x slower than expected
-
-Good luck! The profiler will tell you exactly where to focus.

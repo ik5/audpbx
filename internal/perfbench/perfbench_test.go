@@ -11,6 +11,21 @@
 // a healthy number for a pipeline that takes seconds per minute of audio.
 //
 // Always benchmark this pipeline through a real decoder reading a real file.
+//
+// Note that a benchmark cannot fail, so these numbers only help someone who is
+// looking at them. The properties that must not regress are asserted by
+// ordinary tests instead, which do fail:
+//
+//   - audio.TestResampler_ReadsSourceInBlocks — the resampler must read its
+//     source in large blocks, not frame by frame
+//   - audpbx.TestResampleToMono16_AllocsDoNotScaleWithLength — allocation count
+//     must not grow with input length
+//   - wav/aiff TestSource_ReadSamples_*ZeroAllocsSteadyState — the decoders
+//     must not allocate per call
+//
+// Those assert on call patterns and allocation counts rather than elapsed time,
+// so they are deterministic. Throughput itself is not asserted anywhere; that
+// would need these benchmarks compared against a stored baseline in CI.
 package perfbench
 
 import (

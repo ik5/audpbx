@@ -35,13 +35,20 @@ examples/
 │
 └── profile_resampler/              # Performance profiling tools
     ├── main.go                     # Profiling with timing breakdown
-    ├── benchmark_test.go           # Component benchmarks
-    ├── README_PROFILING.md         # Complete profiling guide
-    ├── QUICK_DEBUG.md              # Quick reference
-    ├── PROFILING_GUIDE.md          # Detailed bottleneck analysis
+    ├── instrumented_resample.go    # ResampleToMono16 with timing points
+    ├── benchmark_test.go           # Component benchmarks (in-memory source)
+    ├── README.md                   # Directory index
+    ├── README_PROFILING.md         # Walkthrough of the tools
+    ├── QUICK_DEBUG.md              # Command reference
+    ├── PROFILING_GUIDE.md          # Case study and bottleneck analysis
     ├── profile.sh                  # Automated profiling script
-    └── Makefile                    # Convenient make commands
+    ├── Makefile                    # Convenient make commands
+    └── go.mod                      # Module dependencies
 ```
+
+End-to-end pipeline benchmarks live outside this directory, in
+[`internal/perfbench`](../internal/perfbench), because they need real decoders
+reading real files rather than an in-memory source.
 
 ## Examples Overview
 
@@ -60,18 +67,21 @@ examples/
 
 **Run it:**
 ```bash
-cd resampler
-go run main.go input.wav output.wav
+# From the repository root
+go run ./examples/resampler input.wav output.wav
 
-# Works with any supported format
-go run main.go song.mp3 output.wav
-go run main.go audio.ogg output.wav
+# Works with any supported format; the decoder is picked from the extension
+go run ./examples/resampler song.mp3 output.wav
+go run ./examples/resampler audio.ogg output.wav
+
+# Target sample rate is optional and defaults to 8000 Hz
+go run ./examples/resampler song.mp3 output.wav 16000
 ```
 
 **What it tests:**
 - ✅ End-to-end format conversion
 - ✅ Decoder integration
-- ✅ Resampling to 8kHz (telephony rate)
+- ✅ Resampling to an arbitrary rate (8 kHz telephony by default)
 - ✅ Mono mixdown from stereo/multi-channel
 - ✅ WAV file writing
 
@@ -114,9 +124,10 @@ go test -bench=. -benchmem
 **What it tests:**
 - ⚡ Processing speed and throughput
 - 📊 Memory allocation patterns
-- 🔍 CPU hotspots (cubic interpolation, decoders, etc.)
+- 🔍 CPU hotspots (in practice: decoder overhead, not interpolation)
 - 💾 Memory usage with large files
-- 🎯 Buffer size impact on performance
+- 🎯 Buffer size impact — expect almost none; the resampler reads its source in
+  fixed internal blocks regardless of the caller's buffer size
 
 **APIs demonstrated:**
 - **Low-level pipeline:** `audio.NewResampler()`, `audio.NewMonoMixer()`
@@ -144,11 +155,17 @@ All examples share test audio files from the `testdata/` directory. These files:
 
 | File | Format | Size | Duration | Best For |
 |------|--------|------|----------|----------|
-| Capricerie (Daniel Bautista) | OGG | 1.4 MB | 1:30 | Quick tests, format validation |
-| Sneakers (GloryToTheMachine) | MP3 | 2.1 MB | 1:00 | Standard integration tests |
+| Capricerie (Daniel Bautista) | OGG | 1.4 MB | 1:43 | Quick tests, format validation |
+| Sneakers (GloryToTheMachine) | MP3 | 2.1 MB | 1:30 | Standard integration tests |
 | Bells Drone (kevp888) | WAV | 167 MB | 16:29 | **Performance testing, large files** |
 
-All files are available in 4 formats (OGG, MP3, WAV, AIFF) with preserved metadata.
+All files are available in 4 formats (OGG, MP3, WAV, AIFF) with preserved
+metadata, except that the two largest `bells_drone` renderings (WAV and AIFF)
+are excluded from version control; fetch them with
+[testdata/manage_testdata.sh](testdata/manage_testdata.sh).
+
+The `Capricerie` file is what `internal/perfbench` measures against, in all four
+formats.
 
 **See:** [testdata/README.md](testdata/README.md) for complete details.
 
@@ -245,14 +262,21 @@ cd examples/resampler  # or profile_resampler
 ### Basic Execution
 
 ```bash
-# Resampler example
-cd resampler
-go run main.go ../testdata/Daniel_Bautista_-_Capricerie_No._5_\(Bach\,_Paganini\).ogg output.wav
+# Resampler example, from the repository root
+go run ./examples/resampler \
+    examples/testdata/Daniel_Bautista_-_Capricerie_No._5_\(Bach\,_Paganini\).ogg \
+    output.wav
 
-# Profile example
-cd profile_resampler
+# With an explicit target sample rate
+go run ./examples/resampler examples/testdata/some_file.mp3 output.wav 16000
+
+# Profile example (its own module, so run it from its directory)
+cd examples/profile_resampler
 go run main.go ../testdata/844152__kevp888__020a_100111_0243_exp02_bells_drone.wav output.wav
 ```
+
+Note that the large `bells_drone` WAV and AIFF files are excluded from version
+control (see `.gitignore`); use `testdata/manage_testdata.sh` to fetch them.
 
 ### With Profiling
 
@@ -273,8 +297,19 @@ go tool pprof -http=:8080 mem.prof
 
 ### Run Benchmarks
 
+End-to-end, through real decoders reading real files. This is the measurement
+that reflects actual performance:
+
 ```bash
-cd profile_resampler
+# From the repository root
+go test ./internal/perfbench/ -bench . -benchtime 5x -benchmem
+```
+
+Component benchmarks, against an in-memory source. Useful for comparing two
+implementations of an inner loop, but blind to decoder overhead and I/O:
+
+```bash
+cd examples/profile_resampler
 
 # All benchmarks
 go test -bench=. -benchmem
@@ -312,6 +347,18 @@ The examples serve as integration tests by:
    - Low-level API flexibility
    - Error handling patterns
 
+### Performance Regression Testing
+
+Separately from the profiling tools, these properties are asserted by tests in
+the main module, each verified by reintroducing the defect it guards:
+
+| Test | Catches |
+|------|---------|
+| `audio.TestResampler_ReadsSourceInBlocks` | Frame-at-a-time source reads (41x slowdown) |
+| `TestResampleToMono16_AllocsDoNotScaleWithLength` | A per-frame allocation anywhere in the pipeline |
+| `wav`/`aiff` `TestSource_ReadSamples_*ZeroAllocs*` | Decoders allocating per call |
+| `aiff.TestSource_ReadSamples_RawBigEndian` | AIFF sample byte order |
+
 ### Performance Testing
 
 The profiling tools measure:
@@ -321,61 +368,107 @@ The profiling tools measure:
    - Realtime ratio (how fast vs. audio duration)
 
 2. **CPU Hotspots**
-   - Cubic interpolation cost (~65% typically)
-   - Decoder overhead
-   - Channel mixing cost
+   - Decoder cost, which dominates for MP3 and Ogg
+   - Syscall time, which should be negligible and is the first thing to check
+     if throughput regresses
+   - Resampling and channel mixing, both small in practice
 
 3. **Memory**
-   - Allocation patterns
+   - Allocation patterns (count matters more than size here — a per-call
+     allocation of a few bytes is invisible by size and glaring by count)
    - GC pressure
    - Buffer efficiency
 
 4. **Scalability**
    - Performance with different file sizes
-   - Impact of buffer size
+   - Impact of buffer size (expect almost none)
    - Streaming efficiency
 
 ## Understanding Performance
 
 ### Typical Performance Characteristics
 
-From `profile_resampler/` testing:
+From `profile_resampler/` on the 17.4 MB WAV test file (103 s, 44.1 kHz stereo
+to 8 kHz mono):
 
 ```
 === Performance Breakdown ===
-File open:          0.2 ms  (  0.1%)
-Decode setup:      12.5 ms  (  0.4%)
-Resample/Mix:    2847.2 ms  ( 94.8%) ← Main processing
-Write output:     145.7 ms  (  4.7%)
+File open:          0.029 ms (  0.0%)
+Decode setup:       0.061 ms (  0.1%)
+Resample/Mix:      61.165 ms ( 97.0%) ← Main processing
+Write output:       1.465 ms (  2.3%)
 ---
-TOTAL:           3005.6 ms
+TOTAL:             63.032 ms
 
-Throughput: ~50-200 MB/s (depends on operations)
+Num GC:          0
+Speed:           275.45 MB/s
+Processing rate: 1637.33x realtime
 ```
 
-### Common Bottlenecks
+End-to-end comparison against `ffmpeg` for the same conversion:
 
-From profiling analysis:
+| Source format | audpbx    | ffmpeg | Allocations |
+|---------------|-----------|--------|-------------|
+| WAV           | **59 ms** | 166 ms | 71          |
+| AIFF          | **58 ms** | 151 ms | 70          |
+| Ogg Vorbis    | 467 ms    | 213 ms | 58 K        |
+| MP3           | 2043 ms   | 198 ms | 552 K       |
 
-1. **Cubic Interpolation** (~65% CPU)
-   - Catmull-Rom spline calculations
-   - 9 multiplications per sample
-   - Called millions of times
+### Where the time actually goes
 
-2. **Format Decoding** (~15% CPU)
-   - Integer → float conversion
-   - Format-specific parsing
-   - I/O overhead
+This is worth reading, because the intuitive answer is wrong.
 
-3. **Channel Mixing** (~5% CPU)
-   - Averaging channels
-   - Memory access patterns
+Cubic interpolation is **not** a bottleneck. It never appeared in the top twenty
+of a CPU profile even when this pipeline ran 40x slower than ffmpeg. The real
+cost then was `read(2)`, at 67% of all CPU time, because the resampler pulled
+one frame at a time from the decoder and the decoder issued one syscall per
+4 bytes. That has been fixed by reading the source in blocks.
 
-4. **Float32→Int16 Conversion** (~5% CPU)
-   - Clamping and scaling
-   - Type conversion
+What remains, by format:
 
-**See:** [profile_resampler/PROFILING_GUIDE.md](profile_resampler/PROFILING_GUIDE.md) for complete analysis.
+1. **WAV and AIFF** — bounded by memory bandwidth. Little left to win.
+2. **MP3** (~2 s) — almost entirely inside `hajimehoshi/go-mp3`: subband
+   synthesis, its IMDCT window (a fresh allocation per call), and `math.Pow` in
+   requantization.
+3. **Ogg** (~470 ms) — almost entirely inside `jfreymuth/vorbis`.
+4. **Resampling and mixing themselves** — a small fraction in every case.
+
+**See:** [profile_resampler/PROFILING_GUIDE.md](profile_resampler/PROFILING_GUIDE.md)
+for the full case study, including profile output and the root cause.
+
+### Benchmark with real files, not mocks
+
+`profile_resampler/benchmark_test.go` uses an in-memory source. It performs no
+syscalls and allocates nothing per call, so it cannot see the costs that
+dominate real runs — it reported healthy numbers throughout the period when the
+pipeline was 40x too slow.
+
+Use it to compare inner-loop implementations. To measure the pipeline, use the
+real-file benchmarks in [`internal/perfbench`](../internal/perfbench):
+
+```bash
+go test ./internal/perfbench/ -bench . -benchtime 5x -benchmem
+```
+
+### Regressions are caught by tests, not by these benchmarks
+
+A benchmark cannot fail, so the properties that must hold are asserted by
+ordinary tests. They check call patterns and allocation counts, which are
+deterministic, rather than elapsed time, which would flake:
+
+```bash
+go test -run 'ReadsSourceInBlocks|AllocsDoNotScale|ZeroAllocsSteadyState' ./...
+```
+
+The most important of these is `audio.TestResampler_ReadsSourceInBlocks`, and
+the reason is worth understanding: making the resampler read frame-at-a-time
+again costs 41x throughput while changing neither the output nor the allocation
+count. Correctness tests pass, allocation tests pass — only the number and size
+of reads into the source gives it away.
+
+See
+[profile_resampler/PROFILING_GUIDE.md](profile_resampler/PROFILING_GUIDE.md#guarding-against-regressions)
+for the full list and what each one catches.
 
 ## API Level Demonstrations
 
@@ -446,8 +539,10 @@ src, err := decoder.Decode(reader)
 
 ### 1. Start with Basic Example
 ```bash
-cd resampler
-go run main.go ../testdata/Daniel_Bautista_-_Capricerie_No._5_\(Bach\,_Paganini\).ogg output.wav
+# From the repository root
+go run ./examples/resampler \
+    examples/testdata/Daniel_Bautista_-_Capricerie_No._5_\(Bach\,_Paganini\).ogg \
+    output.wav
 ```
 
 **Learn:**
@@ -456,14 +551,14 @@ go run main.go ../testdata/Daniel_Bautista_-_Capricerie_No._5_\(Bach\,_Paganini\
 - Format support
 
 ### 2. Read the Code
-- Study `resampler/main.go` (~100 lines)
+- Study `resampler/main.go` (~115 lines)
 - Understand decoder registration
 - See error handling patterns
 
 ### 3. Experiment
 - Try different formats
-- Change target sample rate
-- Modify buffer sizes
+- Change the target sample rate (third argument)
+- Try different buffer sizes — and notice how little difference they make
 
 ### 4. Profile Performance
 ```bash

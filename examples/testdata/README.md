@@ -30,7 +30,7 @@ ffmpeg -i input.ogg -map_metadata 0 output.mp3
 - Source URL and comments
 
 **Characteristics:**
-- Duration: ~90 seconds
+- Duration: 1:43 (103 seconds)
 - Size: ~1.4 MB (OGG), ~18 MB (WAV)
 - Content: Complex instrumental (good for quality testing)
 
@@ -47,7 +47,7 @@ ffmpeg -i input.ogg -map_metadata 0 output.mp3
 All conversions preserve metadata including encoder information and source details.
 
 **Characteristics:**
-- Duration: ~60 seconds
+- Duration: 1:30 (90 seconds)
 - Size: ~2.1 MB (MP3), ~16 MB (WAV)
 - Content: Electronic/beats (good for rhythm testing)
 
@@ -119,8 +119,8 @@ These files provide comprehensive format testing:
 
 | Track | Duration | Size (Original) | Best For |
 |-------|----------|-----------------|----------|
-| Capricerie | 1:30 | 1.4 MB | Quick tests, format validation |
-| Sneakers | 1:00 | 2.1 MB | Rhythm analysis, standard tests |
+| Capricerie | 1:43 | 1.4 MB | Quick tests, format validation |
+| Sneakers | 1:30 | 2.1 MB | Rhythm analysis, standard tests |
 | Bells Drone | 16:29 | **167 MB** | **Performance, memory, large files** |
 
 ## Metadata Testing
@@ -208,10 +208,24 @@ ffprobe -v quiet -show_format "844152__kevp888__020a_100111_0243_exp02_bells_dro
 
 ## Performance Note
 
-The 16-minute Bells Drone file is **perfect** for your profiling needs:
+The 16-minute Bells Drone file is the best asset here for profiling:
 - Real-world large file scenario
 - Tests sustained processing performance
 - Exposes memory leaks or inefficiencies
 - Shows true throughput rates
 
-This is exactly what you need for debugging the 96 MB / 40s performance issue you mentioned!
+Note that its WAV and AIFF renderings are excluded from version control because
+of their size; use `manage_testdata.sh` to regenerate them.
+
+The shorter Capricerie file is what
+[`internal/perfbench`](../../internal/perfbench) benchmarks against, in all four
+formats, since it exists in every container and runs quickly:
+
+```bash
+go test ./internal/perfbench/ -bench . -benchtime 5x -benchmem
+```
+
+For context on what these files were originally used to investigate — a
+pipeline that took ~7 s to convert 103 seconds of audio, since fixed and now
+~59 ms — see
+[../profile_resampler/PROFILING_GUIDE.md](../profile_resampler/PROFILING_GUIDE.md).

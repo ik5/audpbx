@@ -79,8 +79,8 @@ examples/
 
 | Track | Original Format | Duration | Size | Best For |
 |-------|----------------|----------|------|----------|
-| Capricerie | OGG | 1:30 | 1.4 MB | Quick tests, format validation |
-| Sneakers | MP3 | 1:00 | 2.1 MB | Standard tests, rhythm analysis |
+| Capricerie | OGG | 1:43 | 1.4 MB | Quick tests, format validation |
+| Sneakers | MP3 | 1:30 | 2.1 MB | Standard tests, rhythm analysis |
 | Bells Drone | WAV | 16:29 | 167 MB | **Performance testing, large files** |
 
 ## Managing Test Files
@@ -326,8 +326,8 @@ ffprobe -v quiet -show_format -show_entries format_tags "file.mp3"
 
 ### Quick Tests (CI/CD):
 Use smaller files:
-- Capricerie (1.4 MB, 1:30)
-- Sneakers (2.1 MB, 1:00)
+- Capricerie (1.4 MB, 1:43)
+- Sneakers (2.1 MB, 1:30)
 
 ### Performance Tests:
 Use large file:
