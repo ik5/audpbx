@@ -7,7 +7,17 @@ import (
 	"io"
 
 	"github.com/ik5/audpbx/audio"
+	"github.com/ik5/audpbx/utils"
 )
+
+// estimatedOutputSeconds is how many seconds of output ResampleToMono16
+// pre-allocates before it starts reading.
+//
+// Source lengths are not discoverable through the Source interface, so this is
+// a guess tuned to cover typical recordings in a single allocation. Being wrong
+// is cheap in both directions: shorter inputs waste a little capacity, longer
+// ones fall back to doubling.
+const estimatedOutputSeconds = 30
 
 // ResampleToMono16 is a high-level convenience function that resamples audio to a target
 // sample rate, converts it to mono, and collects all samples as 16-bit PCM data.
@@ -45,10 +55,14 @@ func ResampleToMono16(src audio.Source, targetRate int, bufferSize int) ([]int16
 	resampler := audio.NewResampler(src, targetRate)
 	mono := audio.NewMonoMixer(resampler)
 
-	// Pre-allocate based on estimated output size to reduce allocations
-	// Estimate: (source_rate / target_rate) * source_duration
-	// We'll start with a reasonable default and grow if needed
-	estimatedSamples := targetRate * 2 // Assume ~2 seconds initially
+	// Pre-allocate based on estimated output size to reduce allocations.
+	//
+	// Source lengths are not exposed by the Source interface, so the exact
+	// output size is unknown up front. Starting at estimatedOutputSeconds of
+	// output covers the great majority of recordings in one allocation;
+	// anything longer doubles from there, so growth stays logarithmic rather
+	// than copying the whole buffer every few blocks.
+	estimatedSamples := targetRate * estimatedOutputSeconds
 	pcm16 := make([]int16, 0, estimatedSamples)
 	buf := make([]float32, bufferSize)
 
@@ -67,16 +81,9 @@ func ResampleToMono16(src audio.Source, targetRate int, bufferSize int) ([]int16
 			// Batch convert float32 to int16 (inlined for performance)
 			startIdx := len(pcm16)
 			pcm16 = pcm16[:startIdx+n]
-			const maxInt16 float32 = 32768.0
-			for i := range n {
-				x := buf[i]
-				// Clamp to [-1, 1]
-				if x > 1 {
-					x = 1
-				} else if x < -1 {
-					x = -1
-				}
-				pcm16[startIdx+i] = int16(x * maxInt16)
+			out := pcm16[startIdx : startIdx+n]
+			for i, x := range buf[:n] {
+				out[i] = utils.Float32ToInt16(x)
 			}
 		}
 
