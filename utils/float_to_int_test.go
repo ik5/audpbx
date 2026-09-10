@@ -82,8 +82,10 @@ func TestFloat32ToInt16(t *testing.T) {
 			t.Parallel()
 
 			got := Float32ToInt16(tt.input)
-			// Allow for rounding differences of ±1
-			diff := int16(math.Abs(float64(got - tt.want)))
+			// Allow for rounding differences of ±1. The subtraction has to
+			// widen first: computing it in int16 lets a full-scale wrap
+			// (-32768 vs 32767) look like a difference of 1.
+			diff := math.Abs(float64(int32(got) - int32(tt.want)))
 
 			if diff > 1 {
 				t.Errorf("Float32ToInt16(%v) = %v, want %v (diff %v)",
@@ -130,8 +132,9 @@ func TestFloat32ToInt16Symmetry(t *testing.T) {
 		pos := Float32ToInt16(val)
 		neg := Float32ToInt16(-val)
 
-		// Absolute values should be equal (within rounding)
-		if math.Abs(float64(pos+neg)) > 1 {
+		// Absolute values should be equal (within rounding). Widen before
+		// adding so a full-scale wrap cannot cancel itself out to zero.
+		if math.Abs(float64(int32(pos)+int32(neg))) > 1 {
 			t.Errorf("Float32ToInt16 not symmetric: +%v=%v, -%v=%v",
 				val, pos, val, neg)
 		}

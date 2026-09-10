@@ -3,9 +3,12 @@
 package audio
 
 import (
+	"fmt"
 	"io"
 	"math"
 	"testing"
+
+	"github.com/ik5/audpbx/internal/audiotest"
 )
 
 func TestResampler_Metadata(t *testing.T) {
@@ -225,58 +228,71 @@ func TestResampler_InvalidDstSize(t *testing.T) {
 	}
 }
 
+// drainResampler resamples src to dstRate until the stream ends.
+//
+// The resampler is constructed per call, which matters: a Resampler tracks its
+// own end-of-stream state, so resetting only the source and reusing the
+// resampler across benchmark iterations would leave every iteration after the
+// first returning io.EOF immediately — timing an early return rather than the
+// work.
+func drainResampler(src *audiotest.MockSource, dstRate int, buf []float32) {
+	src.Reset()
+	resampler := NewResampler(src, dstRate)
+
+	for {
+		_, err := resampler.ReadSamples(buf)
+		if err != nil {
+			return
+		}
+	}
+}
+
 // BenchmarkResampler_Downsample benchmarks downsampling 44.1kHz -> 8kHz
 func BenchmarkResampler_Downsample(b *testing.B) {
 	src := newSineSource(44100, 2, 100000, 440.0)
-	resampler := NewResampler(src, 8000)
-	buf := make([]float32, 4096)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for range b.N {
-		src.Reset() // Reset
-		for {
-			_, err := resampler.ReadSamples(buf)
-			if err == io.EOF {
-				break
-			}
-		}
-	}
-}
-
-// BenchmarkResampler_Upsample benchmarks upsampling 8kHz -> 44.1kHz
-func BenchmarkResampler_Upsample(b *testing.B) {
-	src := newSineSource(8000, 2, 20000, 440.0)
-	resampler := NewResampler(src, 44100)
-	buf := make([]float32, 4096)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for range b.N {
-		src.Reset() // Reset
-		for {
-			_, err := resampler.ReadSamples(buf)
-			if err == io.EOF {
-				break
-			}
-		}
-	}
-}
-
-// BenchmarkResampler_ReadSamples benchmarks single ReadSamples call
-func BenchmarkResampler_ReadSamples(b *testing.B) {
-	src := newSineSource(44100, 2, 1000000, 440.0)
-	resampler := NewResampler(src, 8000)
 	buf := make([]float32, 4096)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.Reset()
-		_, _ = resampler.ReadSamples(buf)
+		drainResampler(src, 8000, buf)
+	}
+}
+
+// BenchmarkResampler_Upsample benchmarks upsampling 8kHz -> 44.1kHz
+func BenchmarkResampler_Upsample(b *testing.B) {
+	src := newSineSource(8000, 2, 20000, 440.0)
+	buf := make([]float32, 4096)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for b.Loop() {
+		drainResampler(src, 44100, buf)
+	}
+}
+
+// BenchmarkResampler_ReadSamples benchmarks a single ReadSamples call in the
+// steady state, after the first source block has been loaded.
+func BenchmarkResampler_ReadSamples(b *testing.B) {
+	// Long enough that the measured calls never reach the end of the stream.
+	src := newSineSource(44100, 2, 44100*600, 440.0)
+	resampler := NewResampler(src, 8000)
+	buf := make([]float32, 4096)
+
+	// Prime it so one-time setup is not attributed to the measured calls.
+	if _, err := resampler.ReadSamples(buf); err != nil {
+		b.Fatalf("priming ReadSamples() error = %v", err)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for b.Loop() {
+		if _, err := resampler.ReadSamples(buf); err != nil {
+			b.Fatalf("ReadSamples() error = %v", err)
+		}
 	}
 }
 
@@ -478,39 +494,282 @@ func BenchmarkResampler_MultiChannel(b *testing.B) {
 	src := newMockSource(44100, 8, 100000, func(sample int, channel int) float32 {
 		return float32(sample%100) / 100.0
 	})
-	resampler := NewResampler(src, 8000)
 	buf := make([]float32, 4096)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.Reset()
-		for {
-			_, err := resampler.ReadSamples(buf)
-			if err == io.EOF {
-				break
-			}
-		}
+		drainResampler(src, 8000, buf)
 	}
 }
 
-// BenchmarkResampler_SmallBuffer benchmarks with very small buffers
+// BenchmarkResampler_SmallBuffer benchmarks with very small buffers.
+//
+// Output buffer size should barely matter: the resampler reads its source in
+// fixed-size blocks regardless of how much the caller asks for at a time.
 func BenchmarkResampler_SmallBuffer(b *testing.B) {
 	src := newSineSource(44100, 2, 100000, 440.0)
-	resampler := NewResampler(src, 8000)
 	buf := make([]float32, 64)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.Reset()
-		for {
-			_, err := resampler.ReadSamples(buf)
-			if err == io.EOF {
-				break
-			}
+		drainResampler(src, 8000, buf)
+	}
+}
+
+// TestResampler_ZeroAllocsSteadyState guards the property the doc comment
+// promises: once the first block is loaded, streaming allocates nothing.
+//
+// The resampler used to pull one frame per Source.ReadSamples call, which meant
+// the decoders underneath allocated several times per audio frame. Reading in
+// blocks is what makes zero steady-state allocation possible, so a regression
+// here means the block reads have been undone.
+func TestResampler_ZeroAllocsSteadyState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping allocation test in short mode")
+	}
+
+	// Long enough that the sampled runs below never reach EOF.
+	src := newSineSource(44100, 2, 44100*20, 440.0)
+	resampler := NewResampler(src, 8000)
+	buf := make([]float32, 4096)
+
+	// Prime the pipeline so one-time setup is not counted.
+	if _, err := resampler.ReadSamples(buf); err != nil && err != io.EOF {
+		t.Fatalf("priming ReadSamples() error = %v", err)
+	}
+
+	allocs := testing.AllocsPerRun(20, func() {
+		if _, err := resampler.ReadSamples(buf); err != nil && err != io.EOF {
+			t.Fatalf("ReadSamples() error = %v", err)
+		}
+	})
+
+	if allocs > 0 {
+		t.Errorf("Resampler.ReadSamples allocated %v times in steady state, want 0", allocs)
+	}
+}
+
+// collectResampled reads a resampler to exhaustion using dst buffers of
+// bufFrames frames, returning every sample produced.
+func collectResampled(t *testing.T, src Source, dstRate, bufFrames int) []float32 {
+	t.Helper()
+
+	resampler := NewResampler(src, dstRate)
+	buf := make([]float32, bufFrames*src.Channels())
+
+	var out []float32
+
+	for {
+		n, err := resampler.ReadSamples(buf)
+		if n > 0 {
+			out = append(out, buf[:n]...)
+		}
+
+		if err == io.EOF {
+			return out
+		}
+
+		if err != nil {
+			t.Fatalf("ReadSamples() error = %v", err)
 		}
 	}
+}
+
+// TestResampler_BufferSizeIndependence checks that the output depends only on
+// the input and the rates, never on how much the caller asks for per read.
+//
+// This is the invariant that the internal sliding window can most easily
+// break: the read sizes below deliberately straddle the block boundary, so an
+// off-by-one when the window slides or pads shows up as a mismatch rather than
+// as a subtle glitch nobody notices.
+func TestResampler_BufferSizeIndependence(t *testing.T) {
+	t.Parallel()
+
+	bufSizes := []int{1, 2, 7, 64, 1000, 4096, 8191, 8192, 8193, 16387}
+
+	tests := []struct {
+		name     string
+		channels int
+		srcRate  int
+		dstRate  int
+		frames   int
+	}{
+		{"downsample stereo 44.1k to 8k", 2, 44100, 8000, 60000},
+		{"upsample mono 8k to 44.1k", 1, 8000, 44100, 5000},
+		{"same rate stereo", 2, 48000, 48000, 20000},
+		{"extreme downsample mono", 1, 44100, 300, 50000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			newSrc := func() Source {
+				return newSineSource(tt.srcRate, tt.channels, tt.frames*tt.channels, 440.0)
+			}
+
+			want := collectResampled(t, newSrc(), tt.dstRate, bufSizes[0])
+
+			for _, bufFrames := range bufSizes[1:] {
+				got := collectResampled(t, newSrc(), tt.dstRate, bufFrames)
+
+				if len(got) != len(want) {
+					t.Fatalf("bufFrames=%d produced %d samples, want %d",
+						bufFrames, len(got), len(want))
+				}
+
+				for i := range want {
+					if got[i] != want[i] {
+						t.Fatalf("bufFrames=%d: sample %d = %v, want %v",
+							bufFrames, i, got[i], want[i])
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestResampler_IdentityRateIsExact checks the strongest property a resampler
+// has: when the source and target rates are equal, every output sample must
+// equal its input sample, including the first and the last.
+//
+// At a 1:1 ratio the interpolation fraction is always zero, so Catmull-Rom
+// reduces to y1 — the sample itself. Any deviation means the window is
+// misaligned with the position it is supposed to represent.
+//
+// This catches two defects that the previous frame-at-a-time implementation
+// had, both at the edges of the stream, where a lenient "n >= 0" assertion on a
+// silent source cannot see them:
+//   - the final frame was emitted as a duplicate of the previous frame, losing
+//     the true last frame
+//   - a source whose first read returned data together with io.EOF was dropped
+//     entirely, yielding no output at all
+func TestResampler_IdentityRateIsExact(t *testing.T) {
+	t.Parallel()
+
+	const rate = 8000
+
+	for _, channels := range []int{1, 2, 3} {
+		for _, frames := range []int{1, 2, 3, 4, 5, 64, 5000} {
+			name := fmt.Sprintf("channels=%d frames=%d", channels, frames)
+
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				// Distinct, exactly representable values so any duplication or
+				// off-by-one is visible rather than plausible.
+				want := make([]float32, frames*channels)
+				for i := range want {
+					want[i] = float32(i+1) / 65536.0
+				}
+
+				// MockSource counts its third argument in frames, and passes
+				// the frame index to the waveform callback.
+				src := newMockSource(rate, channels, frames,
+					func(frame, channel int) float32 {
+						return want[frame*channels+channel]
+					})
+
+				got := collectResampled(t, src, rate, 64)
+
+				if len(got) != len(want) {
+					t.Fatalf("produced %d samples, want %d", len(got), len(want))
+				}
+
+				for i := range want {
+					if got[i] != want[i] {
+						t.Fatalf("sample %d = %v, want %v (frame %d, channel %d)",
+							i, got[i], want[i], i/channels, i%channels)
+					}
+				}
+			})
+		}
+	}
+}
+
+// countingSource wraps a Source and records how it was read.
+type countingSource struct {
+	Source
+
+	calls           int
+	maxRequestedLen int
+}
+
+func (c *countingSource) ReadSamples(dst []float32) (int, error) {
+	c.calls++
+	if len(dst) > c.maxRequestedLen {
+		c.maxRequestedLen = len(dst)
+	}
+
+	return c.Source.ReadSamples(dst)
+}
+
+// TestResampler_ReadsSourceInBlocks pins the property that makes this package
+// usable: the resampler must pull its source in large blocks, not frame by
+// frame.
+//
+// This is the guard for the defect that made a 103 second file take 6.9
+// seconds to resample instead of 59 ms. Reading one frame at a time meant one
+// Source.ReadSamples call per audio frame, and underneath it one read(2)
+// syscall per 4 bytes, so per-call overhead swamped the arithmetic.
+//
+// Nothing else in the suite catches this. Correctness is unaffected by the
+// block size, so the output-comparison tests stay green; and the decoders reuse
+// their staging buffers, so the allocation tests stay green too. Only the call
+// pattern gives it away, which is what this test inspects.
+func TestResampler_ReadsSourceInBlocks(t *testing.T) {
+	t.Parallel()
+
+	const (
+		channels = 2
+		frames   = 50000
+
+		// The resampler must ask for at least this many frames in a single
+		// read. Well below resamplerBlockFrames, so tuning the block size does
+		// not break the test, but far above the frame-at-a-time regression.
+		minBlockFrames = 512
+
+		// And it must get through the stream in far fewer calls than there are
+		// frames. Generous enough to tolerate short reads from the source.
+		maxCallsPerFrame = 64
+	)
+
+	src := &countingSource{Source: newSineSource(44100, channels, frames, 440.0)}
+
+	resampler := NewResampler(src, 8000)
+	buf := make([]float32, 4096)
+
+	for {
+		_, err := resampler.ReadSamples(buf)
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			t.Fatalf("ReadSamples() error = %v", err)
+		}
+	}
+
+	if src.calls == 0 {
+		t.Fatal("resampler never read from its source")
+	}
+
+	if gotFrames := src.maxRequestedLen / channels; gotFrames < minBlockFrames {
+		t.Errorf("largest source read was %d frames, want at least %d;"+
+			" the resampler appears to be reading frame-at-a-time",
+			gotFrames, minBlockFrames)
+	}
+
+	if maxCalls := frames / maxCallsPerFrame; src.calls > maxCalls {
+		t.Errorf("resampler made %d source reads for %d frames, want at most %d;"+
+			" per-call overhead will dominate at this rate",
+			src.calls, frames, maxCalls)
+	}
+
+	t.Logf("%d source reads for %d frames, largest read %d frames",
+		src.calls, frames, src.maxRequestedLen/channels)
 }

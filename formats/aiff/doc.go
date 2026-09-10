@@ -64,11 +64,19 @@
 //
 // # Performance
 //
-// The AIFF decoder:
-//   - Streams data efficiently
-//   - Minimal allocations (2 per read)
-//   - Efficient buffer management
-//   - Zero allocations in benchmarks
+// For 16-bit files the decoder reads and byte-swaps samples directly from the
+// SSND chunk rather than going through aiff.Decoder.PCMBuffer. PCMBuffer
+// allocates several times on every call and decodes one sample at a time
+// through a closure into an []int four times wider than the samples it carries;
+// reading the chunk directly reduces that to a single read plus a tight decode
+// loop with a staging buffer reused across calls.
+//
+// If the underlying decoder does not expose its SSND chunk, the PCMBuffer path
+// is still used as a fallback, which also covers bit depths other than 16.
+//
+// A full file conversion therefore allocates a handful of times in total rather
+// than several times per audio frame, and the decoder streams, so memory use
+// does not scale with file size.
 //
 // # Limitations
 //

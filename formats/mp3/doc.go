@@ -46,17 +46,27 @@
 //
 // # Performance
 //
-// The MP3 decoder:
-//   - Streams data efficiently
-//   - Minimal allocations during reading
-//   - Suitable for real-time processing
+// MP3 is by a wide margin the slowest input format this module supports.
+// Decoding a 103 second file and resampling it to 8 kHz mono takes roughly
+// 2 seconds, against about 200 ms for ffmpeg, and allocates around 550,000
+// times.
+//
+// Essentially all of that cost is inside github.com/hajimehoshi/go-mp3 — its
+// subband synthesis, its IMDCT window (which returns a freshly allocated slice
+// per call), and the math.Pow calls in its requantization step — rather than in
+// this package or in resampling. It cannot be improved from here without
+// patching or replacing that decoder.
+//
+// If you control the input format and care about throughput, prefer WAV or
+// AIFF, which are roughly thirty times faster end to end.
 //
 // # Limitations
 //
 // Note:
 //   - MP3 writing is not supported (decoding only)
 //   - Output is always stereo (use MonoMixer to convert)
-//   - Requires reading entire frames for decoding
+//   - Decoding is frame-based, so a read may return fewer samples than
+//     requested; always use the returned count
 //
 // # Use Cases
 //

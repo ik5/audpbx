@@ -51,16 +51,22 @@
 //
 // # Performance
 //
-// The Vorbis decoder:
-//   - Streams data efficiently
-//   - Minimal allocations during reading
-//   - Suitable for real-time playback
+// ReadSamples decodes straight into the caller's buffer with no staging buffer
+// and no copy, so the decoder itself adds no allocations on the read path.
+//
+// Decoding a 103 second file and resampling it to 8 kHz mono takes roughly
+// 470 ms, against about 210 ms for ffmpeg. Nearly all of that is Vorbis
+// decoding inside github.com/jfreymuth/vorbis (its IMDCT and residue decode),
+// not resampling. If throughput matters more than file size, prefer WAV or
+// AIFF sources, which are around eight times faster end to end.
 //
 // # Limitations
 //
 // Note:
 //   - Vorbis encoding is not supported (decoding only)
-//   - Reading is frame-based (decode entire frames)
+//   - The underlying reader decodes whole Vorbis packets internally, so a read
+//     may return more or fewer samples than requested; always use the returned
+//     count rather than assuming the buffer was filled
 //
 // # Use Cases
 //

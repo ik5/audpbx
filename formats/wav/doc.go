@@ -8,9 +8,16 @@
 // # Supported Formats
 //
 // Currently supported:
-//   - PCM 16-bit (most common WAV format)
-//   - Mono and stereo
+//   - PCM 16-bit (most common WAV format), format tag 1
+//   - Mono, stereo, and more channels provided the file uses format tag 1
 //   - Any sample rate
+//
+// Not supported:
+//   - Bit depths other than 16 (8, 24, and 32 are rejected)
+//   - WAVE_FORMAT_EXTENSIBLE (format tag 0xFFFE), which is what ffmpeg writes
+//     for files with more than two channels. Such files fail with an
+//     "unsupported audio format" error.
+//   - Compressed WAV payloads of any kind
 //
 // # Decoding WAV Files
 //
@@ -61,10 +68,19 @@
 //   - Chunked writing for large files
 //   - Pre-allocated header buffer
 //
-// The decoder provides:
-//   - Minimal allocations (2 per read)
-//   - Efficient buffer management
-//   - Stream-based reading for memory efficiency
+// The decoder reads and converts 16-bit samples directly from the PCM chunk
+// rather than going through wav.Decoder.PCMBuffer. PCMBuffer allocates a byte
+// buffer, a bytes.Reader, a format struct and a per-sample scratch buffer on
+// every call, and decodes one sample at a time through a closure into an []int
+// four times wider than the samples it carries. Reading the chunk directly
+// reduces that to a single read plus a tight decode loop, which reuses its
+// staging buffer across calls.
+//
+// The result is that decoding is bounded by memory bandwidth rather than by
+// per-call overhead, and a full file conversion allocates a handful of times in
+// total rather than several times per audio frame.
+//
+// The decoder is stream-based, so memory use does not scale with file size.
 //
 // # File Format
 //

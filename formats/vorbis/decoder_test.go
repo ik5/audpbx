@@ -34,25 +34,22 @@ func (m *mockOggVorbisReader) Read(buf []float32) (int, error) {
 		return 0, io.EOF
 	}
 
-	// Calculate frames (not samples)
+	// Mirror oggvorbis.Reader.Read: return the number of values decoded
+	// (frames * channels), always a whole number of frames.
 	framesRequested := len(buf) / m.channels
-	samplesAvailable := len(m.samples) - m.offset
-	framesAvailable := samplesAvailable / m.channels
+	framesAvailable := (len(m.samples) - m.offset) / m.channels
 
-	framesToRead := framesRequested
-	if framesToRead > framesAvailable {
-		framesToRead = framesAvailable
-	}
+	framesToRead := min(framesRequested, framesAvailable)
 
 	samplesToRead := framesToRead * m.channels
 	copy(buf, m.samples[m.offset:m.offset+samplesToRead])
 	m.offset += samplesToRead
 
 	if m.offset >= len(m.samples) {
-		return framesToRead, io.EOF
+		return samplesToRead, io.EOF
 	}
 
-	return framesToRead, nil
+	return samplesToRead, nil
 }
 
 func TestDecoder_InvalidInput(t *testing.T) {
@@ -92,7 +89,7 @@ func TestSource_Metadata(t *testing.T) {
 		},
 		sampleRate: 44100,
 		channels:   2,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	if src.SampleRate() != 44100 {
@@ -124,7 +121,7 @@ func TestSource_ReadSamples(t *testing.T) {
 		dec:        mockReader,
 		sampleRate: 8000,
 		channels:   2,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	dst := make([]float32, 8)
@@ -159,7 +156,7 @@ func TestSource_ReadSamples_EmptyBuffer(t *testing.T) {
 		dec:        mockReader,
 		sampleRate: 8000,
 		channels:   1,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	dst := make([]float32, 0)
@@ -189,7 +186,7 @@ func TestSource_ReadSamples_EOF(t *testing.T) {
 		dec:        mockReader,
 		sampleRate: 8000,
 		channels:   2,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	// Read all samples
@@ -232,7 +229,7 @@ func TestSource_ReadSamples_PartialRead(t *testing.T) {
 		dec:        mockReader,
 		sampleRate: 8000,
 		channels:   2,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	// Read in chunks
@@ -288,7 +285,7 @@ func TestSource_ReadSamples_Mono(t *testing.T) {
 		dec:        mockReader,
 		sampleRate: 16000,
 		channels:   1,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	dst := make([]float32, 5)
@@ -325,7 +322,7 @@ func TestSource_ReadSamples_Stereo(t *testing.T) {
 		dec:        mockReader,
 		sampleRate: 44100,
 		channels:   2,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	dst := make([]float32, 6)
@@ -380,7 +377,7 @@ func TestSource_ReadSamples_MultipleChannels(t *testing.T) {
 				dec:        mockReader,
 				sampleRate: 48000,
 				channels:   tt.channels,
-				frameBuf:   make([]float32, 4096),
+				bufSize:    4096,
 			}
 
 			if src.Channels() != tt.channels {
@@ -420,7 +417,7 @@ func TestSource_ReadSamples_LargeBuffer(t *testing.T) {
 		dec:        mockReader,
 		sampleRate: 44100,
 		channels:   2,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	dst := make([]float32, 10000)
@@ -453,7 +450,7 @@ func TestSource_ReadSamples_SmallReads(t *testing.T) {
 		dec:        mockReader,
 		sampleRate: 8000,
 		channels:   1,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	// Read in very small chunks
@@ -493,7 +490,7 @@ func TestSource_Close(t *testing.T) {
 		dec:        mockReader,
 		sampleRate: 44100,
 		channels:   2,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	err := src.Close()
@@ -521,7 +518,7 @@ func TestSource_VariousSampleRates(t *testing.T) {
 				dec:        mockReader,
 				sampleRate: rate,
 				channels:   2,
-				frameBuf:   make([]float32, 4096),
+				bufSize:    4096,
 			}
 
 			if src.SampleRate() != rate {
@@ -548,7 +545,7 @@ func BenchmarkSource_ReadSamples(b *testing.B) {
 		dec:        mockReader,
 		sampleRate: 44100,
 		channels:   2,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	dst := make([]float32, 4096)
@@ -575,7 +572,7 @@ func BenchmarkSource_ReadSamples_SmallBuffer(b *testing.B) {
 		dec:        mockReader,
 		sampleRate: 44100,
 		channels:   1,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	dst := make([]float32, 64)
@@ -602,7 +599,7 @@ func BenchmarkSource_ReadSamples_LargeBuffer(b *testing.B) {
 		dec:        mockReader,
 		sampleRate: 44100,
 		channels:   2,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	dst := make([]float32, 16384)
@@ -629,7 +626,7 @@ func BenchmarkSource_ReadSamples_Mono(b *testing.B) {
 		dec:        mockReader,
 		sampleRate: 44100,
 		channels:   1,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	dst := make([]float32, 4096)
@@ -656,7 +653,7 @@ func BenchmarkSource_ReadSamples_Stereo(b *testing.B) {
 		dec:        mockReader,
 		sampleRate: 44100,
 		channels:   2,
-		frameBuf:   make([]float32, 4096),
+		bufSize:    4096,
 	}
 
 	dst := make([]float32, 4096)
@@ -667,5 +664,113 @@ func BenchmarkSource_ReadSamples_Stereo(b *testing.B) {
 	for b.Loop() {
 		mockReader.offset = 0
 		_, _ = src.ReadSamples(dst)
+	}
+}
+
+// TestSource_ReadSamples_NeverOverruns checks the Source contract that a read
+// never reports more values than the caller's buffer can hold.
+//
+// This is the guard for a real defect: oggvorbis.Reader.Read returns a count of
+// *values* (frames * channels), but the decoder multiplied that by the channel
+// count again before returning it. At the two-sample reads the rest of these
+// tests used, the two errors cancelled out; at realistic buffer sizes it
+// panicked with "slice bounds out of range".
+//
+// Large buffers are the important case here, so they are covered explicitly.
+func TestSource_ReadSamples_NeverOverruns(t *testing.T) {
+	t.Parallel()
+
+	for _, channels := range []int{1, 2, 6} {
+		samples := make([]float32, 8192*channels)
+		for i := range samples {
+			samples[i] = float32(i%1000) / 1000.0
+		}
+
+		for _, size := range []int{
+			channels, 2 * channels, 64, 1024, 4096, 8192, 16384,
+		} {
+			src := &source{
+				dec: &mockOggVorbisReader{
+					sampleRate: 44100,
+					channels:   channels,
+					samples:    samples,
+				},
+				sampleRate: 44100,
+				channels:   channels,
+				bufSize:    4096,
+			}
+
+			dst := make([]float32, size)
+
+			n, err := src.ReadSamples(dst)
+			if err != nil && err != io.EOF {
+				t.Fatalf("channels=%d size=%d: ReadSamples() error = %v",
+					channels, size, err)
+			}
+
+			if n > len(dst) {
+				t.Fatalf("channels=%d size=%d: ReadSamples() returned n = %d,"+
+					" more than the buffer holds", channels, size, n)
+			}
+
+			if n%channels != 0 {
+				t.Errorf("channels=%d size=%d: ReadSamples() returned n = %d,"+
+					" not a whole number of frames", channels, size, n)
+			}
+		}
+	}
+}
+
+// TestSource_ReadSamples_DrainsFullStream checks that reading to EOF yields
+// every sample exactly once, in order, at a realistic buffer size.
+func TestSource_ReadSamples_DrainsFullStream(t *testing.T) {
+	t.Parallel()
+
+	const channels = 2
+
+	samples := make([]float32, 5000*channels)
+	for i := range samples {
+		samples[i] = float32(i) / float32(len(samples))
+	}
+
+	src := &source{
+		dec: &mockOggVorbisReader{
+			sampleRate: 44100,
+			channels:   channels,
+			samples:    samples,
+		},
+		sampleRate: 44100,
+		channels:   channels,
+		bufSize:    4096,
+	}
+
+	var got []float32
+	dst := make([]float32, 4096)
+
+	for {
+		n, err := src.ReadSamples(dst)
+		got = append(got, dst[:n]...)
+
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			t.Fatalf("ReadSamples() error = %v", err)
+		}
+
+		if n == 0 {
+			t.Fatal("ReadSamples() made no progress and did not report EOF")
+		}
+	}
+
+	if len(got) != len(samples) {
+		t.Fatalf("read %d values in total, want %d", len(got), len(samples))
+	}
+
+	for i := range samples {
+		if got[i] != samples[i] {
+			t.Fatalf("value %d = %v, want %v", i, got[i], samples[i])
+		}
 	}
 }

@@ -575,3 +575,84 @@ func BenchmarkSource_ReadSamples_LargeBuffer(b *testing.B) {
 		_, _ = src.ReadSamples(dst)
 	}
 }
+
+// TestSource_ReadSamples_ZeroAllocsSteadyState guards the direct decode path.
+//
+// The decoder reads 16-bit samples straight from the PCM chunk rather than
+// calling wav.Decoder.PCMBuffer, which allocates several times per call and
+// decodes through an []int intermediate. Correctness tests cannot see that
+// difference — PCMBuffer produces the same samples — so only an allocation
+// assertion catches a revert.
+func TestSource_ReadSamples_ZeroAllocsSteadyState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping allocation test in short mode")
+	}
+
+	const readSize = 4096
+
+	// Long enough that the sampled runs never reach the end of the stream.
+	samples := make([]int16, readSize*200)
+	for i := range samples {
+		samples[i] = int16(i % 4096)
+	}
+
+	wavData := createWAVFile(44100, 2, 16, samples)
+
+	src, err := Decoder{}.Decode(bytes.NewReader(wavData))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+
+	dst := make([]float32, readSize)
+
+	// The first read sizes the staging buffer; that allocation is expected.
+	if _, err := src.ReadSamples(dst); err != nil {
+		t.Fatalf("priming ReadSamples() error = %v", err)
+	}
+
+	allocs := testing.AllocsPerRun(50, func() {
+		if _, err := src.ReadSamples(dst); err != nil && err != io.EOF {
+			t.Fatalf("ReadSamples() error = %v", err)
+		}
+	})
+
+	if allocs > 0 {
+		t.Errorf("ReadSamples allocated %v times per call in steady state, want 0", allocs)
+	}
+}
+
+// TestSource_ReadSamples_NeverOverruns checks the Source contract that a read
+// never reports more values than the caller's buffer can hold.
+func TestSource_ReadSamples_NeverOverruns(t *testing.T) {
+	t.Parallel()
+
+	samples := make([]int16, 500)
+	for i := range samples {
+		samples[i] = int16(i)
+	}
+
+	wavData := createWAVFile(22050, 2, 16, samples)
+
+	src, err := Decoder{}.Decode(bytes.NewReader(wavData))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+
+	for _, size := range []int{1, 2, 3, 17, 64, 999, 5000} {
+		dst := make([]float32, size)
+
+		n, err := src.ReadSamples(dst)
+		if err != nil && err != io.EOF {
+			t.Fatalf("ReadSamples(%d) error = %v", size, err)
+		}
+
+		if n > len(dst) {
+			t.Fatalf("ReadSamples(%d) returned n = %d, more than the buffer holds",
+				size, n)
+		}
+
+		if err == io.EOF {
+			break
+		}
+	}
+}

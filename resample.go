@@ -7,36 +7,51 @@ import (
 	"io"
 
 	"github.com/ik5/audpbx/audio"
+	"github.com/ik5/audpbx/utils"
 )
+
+// estimatedOutputSeconds is how many seconds of output ResampleToMono16
+// pre-allocates before it starts reading.
+//
+// Source lengths are not discoverable through the Source interface, so this is
+// a guess tuned to cover typical recordings in a single allocation. Being wrong
+// is cheap in both directions: shorter inputs waste a little capacity, longer
+// ones fall back to doubling.
+const estimatedOutputSeconds = 30
 
 // ResampleToMono16 is a high-level convenience function that resamples audio to a target
 // sample rate, converts it to mono, and collects all samples as 16-bit PCM data.
 //
 // This function creates a processing pipeline:
-//   1. Resamples the source audio to targetRate using cubic interpolation
-//   2. Converts the resampled audio to mono by averaging channels
-//   3. Reads all samples from the pipeline
-//   4. Converts float32 samples to int16 PCM format
+//
+//  1. Resamples the source audio to targetRate using cubic interpolation
+//  2. Converts the resampled audio to mono by averaging channels
+//  3. Reads all samples from the pipeline
+//  4. Converts float32 samples to int16 PCM format
 //
 // Parameters:
 //   - src: The audio source to process (implements Source interface)
 //   - targetRate: Target sample rate in Hz (e.g., 8000, 16000, 44100, 48000)
-//   - bufferSize: Size of the buffer for reading samples (e.g., 4096)
-//                 Larger buffers may be more efficient but use more memory
+//   - bufferSize: Size of the buffer for reading samples. This has very little
+//     effect on throughput, because the resampler reads its source in fixed
+//     internal blocks regardless of how much is requested per call.
+//     audio.DefaultBufSize is a reasonable choice.
 //
 // Returns:
 //   - []int16: Collected PCM samples as 16-bit signed integers
 //   - int: The output sample rate (same as targetRate)
-//   - error: Any error encountered during processing, or io.EOF when complete
+//   - error: Any error encountered during processing. io.EOF is not returned;
+//     reaching the end of the source is the normal successful outcome.
 //
-// Note: This is a convenience function for common use cases. For more control over
-// the audio processing pipeline, use NewResampler() and NewMonoMixer() directly.
+// Note that the entire result is collected in memory. For long inputs, or to
+// avoid buffering the whole output, drive NewResampler and NewMonoMixer
+// directly and consume the samples as they are produced.
 //
 // Example:
 //
 //	src, _ := decoder.Decode(file)
-//	pcm16, rate, err := audio.ResampleToMono16(src, 8000, 4096)
-//	if err != nil && err != io.EOF {
+//	pcm16, rate, err := audpbx.ResampleToMono16(src, 8000, audio.DefaultBufSize)
+//	if err != nil {
 //	    panic(err)
 //	}
 //	// pcm16 now contains mono 16-bit PCM at 8kHz
@@ -45,10 +60,14 @@ func ResampleToMono16(src audio.Source, targetRate int, bufferSize int) ([]int16
 	resampler := audio.NewResampler(src, targetRate)
 	mono := audio.NewMonoMixer(resampler)
 
-	// Pre-allocate based on estimated output size to reduce allocations
-	// Estimate: (source_rate / target_rate) * source_duration
-	// We'll start with a reasonable default and grow if needed
-	estimatedSamples := targetRate * 2 // Assume ~2 seconds initially
+	// Pre-allocate based on estimated output size to reduce allocations.
+	//
+	// Source lengths are not exposed by the Source interface, so the exact
+	// output size is unknown up front. Starting at estimatedOutputSeconds of
+	// output covers the great majority of recordings in one allocation;
+	// anything longer doubles from there, so growth stays logarithmic rather
+	// than copying the whole buffer every few blocks.
+	estimatedSamples := targetRate * estimatedOutputSeconds
 	pcm16 := make([]int16, 0, estimatedSamples)
 	buf := make([]float32, bufferSize)
 
@@ -67,16 +86,9 @@ func ResampleToMono16(src audio.Source, targetRate int, bufferSize int) ([]int16
 			// Batch convert float32 to int16 (inlined for performance)
 			startIdx := len(pcm16)
 			pcm16 = pcm16[:startIdx+n]
-			const maxInt16 float32 = 32768.0
-			for i := range n {
-				x := buf[i]
-				// Clamp to [-1, 1]
-				if x > 1 {
-					x = 1
-				} else if x < -1 {
-					x = -1
-				}
-				pcm16[startIdx+i] = int16(x * maxInt16)
+			out := pcm16[startIdx : startIdx+n]
+			for i, x := range buf[:n] {
+				out[i] = utils.Float32ToInt16(x)
 			}
 		}
 

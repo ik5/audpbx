@@ -91,21 +91,35 @@ import (
 
 func main() {
     // Decode MP3
-    mp3File, _ := os.Open("input.mp3")
+    mp3File, err := os.Open("input.mp3")
+    if err != nil {
+        log.Fatal(err)
+    }
     defer mp3File.Close()
-    
+
     decoder := mp3.Decoder{}
-    src, _ := decoder.Decode(mp3File)
+    src, err := decoder.Decode(mp3File)
+    if err != nil {
+        log.Fatal(err)
+    }
     defer src.Close()
-    
+
     // Convert to 16kHz mono
-    pcm16, rate, _ := audpbx.ResampleToMono16(src, 16000, 4096)
-    
+    pcm16, rate, err := audpbx.ResampleToMono16(src, 16000, 4096)
+    if err != nil {
+        log.Fatal(err)
+    }
+
     // Write WAV
-    wavFile, _ := os.Create("output.wav")
+    wavFile, err := os.Create("output.wav")
+    if err != nil {
+        log.Fatal(err)
+    }
     defer wavFile.Close()
-    
-    wav.WriteWAV16(wavFile, rate, pcm16)
+
+    if err := wav.WriteWAV16(wavFile, rate, pcm16); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -164,10 +178,32 @@ func main() {
 
 | Format | Decoder | Encoder | Notes |
 |--------|---------|---------|-------|
-| WAV | ✅ | ✅ | PCM 16-bit, powered by [go-audio/wav](https://github.com/go-audio/wav) |
-| MP3 | ✅ | ❌ | Decode-only, powered by [hajimehoshi/go-mp3](https://github.com/hajimehoshi/go-mp3) |
+| WAV | ✅ | ✅ | PCM 16-bit only, powered by [go-audio/wav](https://github.com/go-audio/wav) |
+| MP3 | ✅ | ❌ | Decode-only, always outputs stereo, powered by [hajimehoshi/go-mp3](https://github.com/hajimehoshi/go-mp3) |
 | Ogg Vorbis | ✅ | ❌ | Decode-only, powered by [jfreymuth/oggvorbis](https://github.com/jfreymuth/oggvorbis) |
 | AIFF | ✅ | ❌ | PCM 16-bit decode-only, powered by [go-audio/aiff](https://github.com/go-audio/aiff) |
+
+## Limitations
+
+Worth knowing before you adopt this:
+
+- **Anti-aliasing when downsampling is weak.** The filter is a single-pole
+  low-pass with a fixed coefficient that does not track the resampling ratio, so
+  content above the output Nyquist frequency is not properly removed. Measured
+  on a 6 kHz tone resampled 44.1 kHz to 8 kHz, where it should vanish: audpbx
+  leaves it at −27.9 dB, ffmpeg at −73.7 dB, a difference of about 46 dB. The
+  surviving energy aliases down to 2 kHz. If you are downsampling music or
+  wideband speech and care about artifacts, this matters; a polyphase FIR is the
+  proper fix and is not yet implemented.
+- **WAV supports only 16-bit PCM with format tag 1.** Files using
+  `WAVE_FORMAT_EXTENSIBLE` (tag `0xFFFE`), which is what `ffmpeg` emits for more
+  than two channels, are rejected with an "unsupported audio format" error. So
+  are 8-, 24-, and 32-bit files.
+- **AIFF supports only 16-bit PCM.** AIFF-C (`.aifc`) is not supported.
+- **MP3 and Ogg decoding is slow** relative to ffmpeg — see
+  [Performance](#performance). The cost is in the upstream decoders.
+- **No encoding except WAV.** Output is mono 16-bit PCM WAV via
+  `wav.WriteWAV16`.
 
 ## Architecture
 
@@ -384,7 +420,7 @@ result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
 // Example 2: Resample different channels to different rates
 result, err := audpbx.ProcessChannels(src, audio.Layout5Point1,
     audpbx.WithResample(func(ch audio.Channel) int {
-        if ch == audio.ChannelLFE {
+        if ch == audio.ChannelLowFrequency {
             return 8000  // Subwoofer doesn't need high sample rate
         }
         return 44100 // Other channels at full quality
@@ -455,36 +491,74 @@ The `ProcessChannels` function supports these options:
 
 ## Performance
 
-The library is designed for high performance with minimal allocations:
+### End-to-end conversion
 
-### Benchmarks
+Converting a 103 second 44.1 kHz stereo recording to 8 kHz mono 16-bit PCM,
+measured on an Intel i7-6820HQ, with `ffmpeg` shown for reference:
+
+| Source format | audpbx    | ffmpeg | Allocations |
+|---------------|-----------|--------|-------------|
+| WAV           | **59 ms** | 166 ms | 71          |
+| AIFF          | **58 ms** | 151 ms | 70          |
+| Ogg Vorbis    | 467 ms    | 213 ms | 58 K        |
+| MP3           | 2043 ms   | 198 ms | 552 K       |
+
+For PCM sources the pipeline is roughly 2.5-3x faster than ffmpeg and allocates
+about 70 times for the whole file — the conversion completes without triggering
+a single garbage collection.
+
+MP3 and Ogg are bound inside their third-party decoders
+(`hajimehoshi/go-mp3` and `jfreymuth/vorbis`), not in this library's resampling
+code. Closing that gap means patching or replacing those decoders. See
+[examples/profile_resampler/PROFILING_GUIDE.md](examples/profile_resampler/PROFILING_GUIDE.md).
+
+Reproduce with:
+
+```bash
+go test ./internal/perfbench/ -bench . -benchtime 5x -benchmem
+```
+
+### Component benchmarks
 
 ```
-# Core audio processing
-BenchmarkResampleToMono16-8                      4.5ms   115KB   13 allocs/op
-BenchmarkResampleToMono16_LargeBuffer-8          4.1ms   262KB   13 allocs/op
-BenchmarkResampleToMono16_SmallBuffer-8          4.0ms    70KB   12 allocs/op
-BenchmarkResampleToMono16_Upsample-8             1.6ms   262KB   13 allocs/op
+# Resampling (100,000 frames, 44.1 kHz stereo, per full stream)
+BenchmarkResampler_Downsample-8         4.97ms    73KB     3 allocs/op
+BenchmarkResampler_Upsample-8           2.77ms    73KB     3 allocs/op
+BenchmarkResampler_SmallBuffer-8        4.90ms    73KB     3 allocs/op
+BenchmarkResampler_MultiChannel-8       5.84ms   270KB     3 allocs/op
+BenchmarkResampler_ReadSamples-8       557.2µs      0B     0 allocs/op
 
-# High-level channel processing (new!)
-BenchmarkSplitToMonoSources-8                    4.4µs   352B     3 allocs/op
-BenchmarkProcessAndSaveChannel-8                 1.2ms   859KB   18 allocs/op
-BenchmarkProcessAndSaveChannelWriter-8           1.0ms   865KB   16 allocs/op
-BenchmarkProcessChannels_Stereo-8                1.3ms  1034KB   27 allocs/op
-BenchmarkProcessChannels_5Point1-8               3.6ms  1447KB   68 allocs/op
-BenchmarkProcessChannels_WithResample-8          2.6ms  1047KB   41 allocs/op
-BenchmarkProcessChannels_WithGain-8              1.4ms  1034KB   30 allocs/op
-BenchmarkProcessChannels_Concurrent-8            2.5ms  1449KB   90 allocs/op
-BenchmarkProcessChannels_SelectiveChannels-8     1.0ms   548KB   29 allocs/op
-BenchmarkProcessChannels_ComplexPipeline-8       3.4ms   582KB   46 allocs/op
+# Mono mixing
+BenchmarkMonoMixer_Passthrough-8       349.0µs      0B     0 allocs/op
+BenchmarkMonoMixer_StereoToMono-8       4.34ms      0B     0 allocs/op
+
+# High-level API
+BenchmarkResampleToMono16-8             2.35ms   623KB     9 allocs/op
+BenchmarkResampleToMono16_Upsample-8    1.75ms  2786KB     9 allocs/op
+BenchmarkSplitToMonoSources-8          226.0ns    352B     3 allocs/op
+BenchmarkProcessAndSaveChannel-8       452.6µs   884KB    15 allocs/op
+BenchmarkProcessChannels_Stereo-8      905.7µs  1034KB    28 allocs/op
+BenchmarkProcessChannels_5Point1-8      2.97ms  1447KB    69 allocs/op
+BenchmarkProcessChannels_WithResample-8 1.07ms  1096KB    34 allocs/op
+BenchmarkProcessChannels_Concurrent-8   2.20ms  1449KB    90 allocs/op
 ```
+
+The three allocations per resampled stream are one-time setup in
+`NewResampler`; `ReadSamples` itself allocates nothing once streaming has
+started.
 
 ### Optimization Tips
 
-1. **Buffer Size**: Larger buffers (4096-16384 samples) reduce function call overhead
-2. **Reuse Buffers**: Allocate buffers once and reuse them
-3. **Batch Processing**: Process audio in chunks for better cache performance
-4. **Avoid Allocations**: The library is designed for near-zero allocations in hot paths
+1. **Buffer size barely matters.** `Resampler` reads its source in fixed
+   internal blocks regardless of how much you ask for per call, so a 64-sample
+   buffer and a 4096-sample buffer perform the same (4.90 ms vs 4.97 ms above).
+   Pick whatever suits your call site; `audio.DefaultBufSize` is a reasonable
+   default.
+2. **Reuse buffers.** Allocate once outside your read loop and reuse.
+3. **Stream rather than buffer whole files.** The pipeline is fully streaming;
+   only `ResampleToMono16` collects the entire result in memory.
+4. **Prefer WAV or AIFF sources** when you control the input format. Decoding,
+   not resampling, is what costs for MP3 and Ogg.
 
 ## API Reference
 
@@ -515,6 +589,26 @@ type Decoder interface {
     Decode(r io.Reader) (Source, error)
 }
 ```
+
+#### Constants
+
+```go
+// audio: the default read size a Source reports from BufSize(), and a
+// reasonable default for sizing your own read buffers.
+audio.DefaultBufSize   // 4096
+```
+
+```go
+// utils: PCM sample geometry, shared by the decoders and sample converters.
+utils.BitsPerByte                                      // 8
+utils.BitDepth8, BitDepth16, BitDepth24, BitDepth32    // 8, 16, 24, 32
+utils.BytesPerSample8 ... BytesPerSample32             // 1, 2, 3, 4
+utils.SampleScale8    ... SampleScale32                // 2^(bits-1)
+```
+
+`SampleScaleN` maps a normalized float sample in `[-1, 1]` onto the integer
+range of that bit depth; dividing a raw integer sample by it yields a float in
+`[-1, 1)`.
 
 ### Main Functions
 
@@ -636,8 +730,6 @@ if err != nil {
 
 ## Testing
 
-Run the full test suite:
-
 ```bash
 # Run all tests
 go test ./...
@@ -645,21 +737,69 @@ go test ./...
 # Run tests with coverage
 go test -cover ./...
 
-# Run benchmarks
+# Run component benchmarks
 go test -bench=. ./...
 
-# Run specific benchmark
+# Run a specific benchmark
 go test -bench=BenchmarkResampler ./audio
 ```
+
+### Real-file benchmarks
+
+Component benchmarks run against in-memory sources, which cannot see decoder
+call overhead or file I/O — historically the dominant cost in this pipeline. To
+measure end-to-end performance through real decoders reading real files:
+
+```bash
+go test ./internal/perfbench/ -bench . -benchtime 5x -benchmem
+```
+
+These skip automatically if the test assets under `examples/testdata/` are not
+present. See
+[examples/profile_resampler/PROFILING_GUIDE.md](examples/profile_resampler/PROFILING_GUIDE.md)
+for why this distinction matters.
+
+### Performance regression tests
+
+Performance here is protected by ordinary `go test` assertions, not by timing.
+Each was verified by reintroducing the defect and confirming the test fails:
+
+| Test | Catches |
+|------|---------|
+| `audio.TestResampler_ReadsSourceInBlocks` | The resampler reading its source frame-at-a-time |
+| `TestResampleToMono16_AllocsDoNotScaleWithLength` | A per-frame allocation anywhere in the pipeline |
+| `audio.TestResampler_ZeroAllocsSteadyState` | An allocation on the resampler's streaming path |
+| `wav.TestSource_ReadSamples_ZeroAllocsSteadyState` | A per-call allocation in the WAV decoder |
+| `aiff.TestSource_ReadSamples_RawZeroAllocsSteadyState` | The AIFF decoder losing its direct-decode path |
+
+They assert on **call patterns and allocation counts**, which are deterministic,
+rather than on wall-clock time, which would flake. That choice matters: the
+original 40x slowdown was per-call overhead, which changes neither the output
+nor the allocation count — only how often the source is read. Reverting to
+frame-at-a-time reads makes the WAV pipeline 41x slower while leaving every
+correctness and allocation test green, so the call-pattern test is the only
+thing that sees it.
+
+Throughput itself is not asserted; that would need benchmark tracking against a
+stored baseline in CI.
 
 ## Examples
 
 The repository includes complete examples in the `examples/` directory:
 
 ```bash
-# Run the resampler example
-go run examples/resampler/main.go input.wav output.wav 8000
+# Convert to the default 8 kHz
+go run ./examples/resampler input.wav output.wav
+
+# Or specify a target sample rate
+go run ./examples/resampler input.mp3 output.wav 16000
 ```
+
+The converter accepts any supported input format and picks the decoder from the
+file extension.
+
+Performance analysis tools live in
+[examples/profile_resampler](examples/profile_resampler).
 
 More examples in the [documentation](https://pkg.go.dev/github.com/ik5/audpbx).
 
@@ -697,7 +837,7 @@ This project is licensed under the **Eclipse Public License 2.0** — see the [L
 
 ## Acknowledgments
 
-- Built with Go 1.23+ features (range-over-int, b.Loop())
+- Requires Go 1.25+ (uses range-over-int and `b.Loop()`)
 - Inspired by telephony and VoIP audio processing requirements
 - Uses industry-standard audio libraries for format support
 
@@ -719,3 +859,38 @@ The following features are planned:
 * [ ] Support Opus format.
 * [ ] Support AAC format (as binding with static linking, static building, dynamic library - building based on tags).
 * [ ] Additional audio test files for each format.
+* [ ] **Selectable resampling algorithm.** Allow the caller to choose the
+      resampling method rather than hard-coding cubic interpolation, trading
+      throughput against fidelity per use case:
+
+  | Method | Characteristics |
+  |--------|-----------------|
+  | Linear | Cheapest; adequate when the source is already band-limited or when latency dominates |
+  | Cubic (Catmull-Rom) | Current behaviour; good general-purpose default |
+  | Polyphase FIR | Highest fidelity; proper band-limiting for large decimation ratios |
+
+  Design notes for whoever picks this up:
+
+  - Cubic should remain the default so existing callers are unaffected. A
+    functional option on `NewResampler` (for example `WithInterpolator`) keeps
+    the current signature valid.
+  - The polyphase option also resolves the anti-aliasing shortfall described
+    under [Limitations](#limitations), which cannot be addressed by retuning
+    the existing one-pole filter. A polyphase FIR performs band-limiting and
+    rate conversion in a single operation, so it replaces both the cubic
+    interpolator and the one-pole filter rather than being layered on top of
+    them.
+  - Common telephony conversions are exact rational ratios (44.1 kHz to 8 kHz
+    is 441/80), so a polyphase implementation can precompute one coefficient
+    set per phase and evaluate only the output samples actually required.
+  - Selecting a method changes output samples. The bit-exact comparisons and
+    the quality measurements in
+    [examples/profile_resampler/PROFILING_GUIDE.md](examples/profile_resampler/PROFILING_GUIDE.md)
+    should be extended to cover each method independently.
+
+  This is a design placeholder only; implementation is deliberately out of
+  scope for the current branch.
+
+* [ ] Accept `WAVE_FORMAT_EXTENSIBLE` WAV files, and bit depths other than 16.
+* [ ] Close the MP3 and Ogg decode gap, which needs work in (or replacement of)
+      the upstream decoders.

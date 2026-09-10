@@ -3,13 +3,17 @@
 package wav
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 
-	goaudio "github.com/go-audio/audio"
 	"github.com/go-audio/wav"
 	"github.com/ik5/audpbx/audio"
+	"github.com/ik5/audpbx/utils"
 )
+
+// pcmAudioFormat is the WAV format tag for uncompressed PCM.
+const pcmAudioFormat = 1
 
 // source wraps go-audio wav.Decoder to implement audio.Source
 type source struct {
@@ -17,69 +21,68 @@ type source struct {
 	sampleRate int
 	channels   int
 	bitDepth   int
-	intBuf     *goaudio.IntBuffer
+
+	// pcm reads the raw bytes of the PCM chunk.
+	//
+	// Decoding those bytes here rather than calling wav.Decoder.PCMBuffer is a
+	// large win: PCMBuffer allocates a byte buffer, a bytes.Reader, a format
+	// struct and a per-sample scratch buffer on every call, then decodes one
+	// sample at a time through a closure into an []int that is four times wider
+	// than the samples it carries. Reading the chunk directly turns the whole
+	// thing into one read plus a tight decode loop.
+	pcm io.Reader
+	raw []byte
 }
 
 func (s *source) SampleRate() int { return s.sampleRate }
 func (s *source) Channels() int   { return s.channels }
 func (s *source) Close() error    { return nil }
-func (s *source) BufSize() int {
-	if s.intBuf != nil {
-		return cap(s.intBuf.Data)
-	}
-	return 4096
-}
+func (s *source) BufSize() int    { return audio.DefaultBufSize }
 
 func (s *source) ReadSamples(dst []float32) (int, error) {
 	if len(dst) == 0 {
 		return 0, nil
 	}
 
-	// Resize buffer if needed
-	if s.intBuf == nil || cap(s.intBuf.Data) < len(dst) {
-		s.intBuf = &goaudio.IntBuffer{
-			Data:   make([]int, len(dst)),
-			Format: s.dec.Format(),
-		}
-	} else {
-		s.intBuf.Data = s.intBuf.Data[:len(dst)]
+	// Decode rejects anything that is not 16-bit PCM, so that is the only
+	// layout that can reach here. Guard anyway: if the accepted formats are
+	// ever widened, this loop has to be widened with them.
+	if s.bitDepth != utils.BitDepth16 {
+		return 0, ErrOnlyPCM16bitSupported
 	}
 
-	// Read from decoder
-	n, err := s.dec.PCMBuffer(s.intBuf)
-	if n == 0 {
-		if err != nil {
-			return 0, err
-		}
+	need := len(dst) * utils.BytesPerSample16
+	if cap(s.raw) < need {
+		s.raw = make([]byte, need)
+	}
+	buf := s.raw[:need]
+
+	n, err := io.ReadFull(s.pcm, buf)
+	switch {
+	case err == io.EOF || err == io.ErrUnexpectedEOF:
+		err = io.EOF
+	case err != nil:
+		return 0, fmt.Errorf("reading pcm data: %w", err)
+	}
+
+	samples := n / utils.BytesPerSample16
+	if samples == 0 {
 		return 0, io.EOF
 	}
 
-	// Convert int samples to float32
-	// go-audio uses int format, we need to normalize based on bit depth
-	var maxVal float32
-	switch s.bitDepth {
-	case 8:
-		maxVal = 128.0
-	case 16:
-		maxVal = 32768.0
-	case 24:
-		maxVal = 8388608.0
-	case 32:
-		maxVal = 2147483648.0
-	default:
-		maxVal = 32768.0 // Default to 16-bit
+	// WAV PCM is little-endian.
+	for i := range samples {
+		offset := i * utils.BytesPerSample16
+		v := int16(binary.LittleEndian.Uint16(buf[offset:]))
+		dst[i] = float32(v) / utils.SampleScale16
 	}
 
-	for i := range n {
-		dst[i] = float32(s.intBuf.Data[i]) / maxVal
+	// If we got fewer samples than requested, we're at EOF
+	if samples < len(dst) {
+		return samples, io.EOF
 	}
 
-	// If we got fewer samples than requested and no error, we're at EOF
-	if n < len(dst) && err == nil {
-		return n, io.EOF
-	}
-
-	return n, err
+	return samples, err
 }
 
 type Decoder struct{}
@@ -102,13 +105,13 @@ func (Decoder) Decode(r io.Reader) (audio.Source, error) {
 		return nil, ErrNotWavFile
 	}
 
-	// Only support PCM for now (WAV audio format 1)
-	if dec.WavAudioFormat != 1 {
+	// Only support PCM for now
+	if dec.WavAudioFormat != pcmAudioFormat {
 		return nil, fmt.Errorf("unsupported audio format: %d (only PCM supported)", dec.WavAudioFormat)
 	}
 
 	// Check bit depth
-	if dec.BitDepth != 16 {
+	if int(dec.BitDepth) != utils.BitDepth16 {
 		return nil, ErrOnlyPCM16bitSupported
 	}
 
@@ -122,11 +125,18 @@ func (Decoder) Decode(r io.Reader) (audio.Source, error) {
 		return nil, ErrUnsupportedWavLayout
 	}
 
+	// FwdToPCM leaves PCMChunk positioned at the start of the sample data, and
+	// its reader is bounded to the chunk, so reads stop at the end of the audio.
+	if dec.PCMChunk == nil || dec.PCMChunk.R == nil {
+		return nil, ErrUnsupportedWavLayout
+	}
+
 	return &source{
 		dec:        dec,
 		sampleRate: format.SampleRate,
 		channels:   format.NumChannels,
 		bitDepth:   int(dec.BitDepth),
+		pcm:        dec.PCMChunk.R,
 	}, nil
 }
 

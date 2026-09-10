@@ -136,11 +136,34 @@
 //
 // # Performance
 //
-// The package is optimized for performance with minimal allocations:
-//   - Resampling uses cubic interpolation for quality
-//   - Buffer reuse minimizes GC pressure
+// Converting a 103 second 44.1 kHz stereo recording to 8 kHz mono takes about
+// 59 ms from WAV or AIFF on a mid-range x86-64 laptop, which is roughly 2.5x
+// faster than ffmpeg doing the same job, and allocates about 70 times for the
+// whole file. MP3 sources take about 2 s and Ogg Vorbis about 470 ms; that time
+// is spent inside the third-party decoders rather than in resampling.
+//
+// What makes this fast:
+//   - Resampler reads its source in large blocks, so decoder call overhead and
+//     read(2) traffic are amortised instead of paid per audio frame
+//   - The WAV and AIFF decoders decode samples directly, avoiding a per-call
+//     allocation and an intermediate []int four times wider than the samples
+//   - Resampler.ReadSamples allocates nothing once streaming has started
 //   - Batch conversions reduce per-sample overhead
-//   - Zero allocations in steady state for most operations
+//
+// Buffer size has very little effect on throughput: the resampler reads its
+// source in fixed internal blocks regardless of how much a caller requests per
+// call. audio.DefaultBufSize is a reasonable default.
+//
+// # Limitations
+//
+// Resampling quality: the anti-aliasing filter used when downsampling is a
+// one-pole low-pass with a fixed coefficient that does not track the resampling
+// ratio, so content above the output Nyquist frequency is not fully removed and
+// will alias. For a 6 kHz tone resampled from 44.1 kHz to 8 kHz, this package
+// leaves it around -28 dB where ffmpeg reaches -74 dB.
+//
+// Format coverage: WAV and AIFF support 16-bit PCM only, and WAV rejects
+// WAVE_FORMAT_EXTENSIBLE files. Only WAV can be written.
 //
 // See the individual subpackages for more detailed documentation.
 package audpbx

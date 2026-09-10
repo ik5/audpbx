@@ -1,0 +1,115 @@
+# Test Audio Files License Information
+
+This directory contains audio files used for testing purposes only.
+
+## Track 1: Capricerie No. 5 (Bach, Paganini)
+
+- **Artist:** Daniel Bautista
+- **Title:** Capricerie No. 5 (Bach, Paganini)
+- **Source:** https://www.jamendo.com/track/2283005/capricerie-no-5-bach-paganini
+- **License:** CC-BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+- **Files:**
+  - `Daniel_Bautista_-_Capricerie_No._5_(Bach,_Paganini).ogg` (original)
+  - `Daniel_Bautista_-_Capricerie_No._5_(Bach,_Paganini).mp3`
+  - `Daniel_Bautista_-_Capricerie_No._5_(Bach,_Paganini).wav`
+  - `Daniel_Bautista_-_Capricerie_No._5_(Bach,_Paganini).aiff`
+
+**Usage:** Testing purposes only. Any commercial or non-personal uses must be addressed
+through Jamendo and Daniel Bautista.
+
+## Track 2: SNEAKERS 128BPM [MELODIC_DATA_STREAM]
+
+- **Artist:** GloryToTheMachine
+- **Title:** SNEAKERS 128BPM [MELODIC_DATA_STREAM] - GLORYTOTHEMACHINE
+- **Source:** https://freesound.org/people/GloryToTheMachine/sounds/843594/
+- **License:** CC-BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+- **Files:**
+  - `843594__glorytothemachine__sneakers-128bpm-melodic_data_stream-glorytothemachine.mp3` (original)
+  - `843594__glorytothemachine__sneakers-128bpm-melodic_data_stream-glorytothemachine.wav`
+  - `843594__glorytothemachine__sneakers-128bpm-melodic_data_stream-glorytothemachine.ogg`
+  - `843594__glorytothemachine__sneakers-128bpm-melodic_data_stream-glorytothemachine.aiff`
+
+**Usage:** Testing purposes only under CC-BY 4.0 license.
+
+## Track 3: Bells Drone
+
+- **Artist:** kevp888 (Kevin Luce)
+- **Title:** 020A_100111_0243_EXP02_Bells_drone
+- **Source:** https://freesound.org/people/kevp888/sounds/844152/
+- **License:** CC-BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+- **Description:** Meditative bells drone atmosphere. 16:29 duration, stereo, 44.1kHz.
+- **Files:**
+  - `844152__kevp888__020a_100111_0243_exp02_bells_drone.wav` (original)
+  - `844152__kevp888__020a_100111_0243_exp02_bells_drone.mp3`
+  - `844152__kevp888__020a_100111_0243_exp02_bells_drone.ogg`
+  - `844152__kevp888__020a_100111_0243_exp02_bells_drone.aiff`
+
+**Usage:** Testing purposes only under CC-BY 4.0 license.
+
+**Attribution:** Credit to "kevp888 or Kevin Luce" from www.freesound.org
+
+---
+
+## Attribution Requirements
+
+When using these files, proper attribution must be given as specified by the CC-BY 4.0 license.
+
+## Purpose
+
+These audio files are included for:
+- Integration testing of audio decoders (WAV, MP3, OGG, AIFF)
+- Testing audio resampling functionality
+- Performance profiling and benchmarking
+- Example code demonstrations
+
+Not intended for distribution or commercial use beyond testing this library.
+|||||| 42c891f
+=======
+# Test Audio Files License Information
+
+This directory contains audio files used for testing purposes only.
+
+## Track 1: Capricerie No. 5 (Bach, Paganini)
+
+- **Artist:** Daniel Bautista
+- **Title:** Capricerie No. 5 (Bach, Paganini)
+- **Source:** https://www.jamendo.com/track/2283005/capricerie-no-5-bach-paganini
+- **License:** CC-BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+- **Files:**
+  - `Daniel_Bautista_-_Capricerie_No._5_(Bach,_Paganini).ogg` (original)
+  - `Daniel_Bautista_-_Capricerie_No._5_(Bach,_Paganini).mp3`
+  - `Daniel_Bautista_-_Capricerie_No._5_(Bach,_Paganini).wav`
+  - `Daniel_Bautista_-_Capricerie_No._5_(Bach,_Paganini).aiff`
+
+**Usage:** Testing purposes only. Any commercial or non-personal uses must be addressed
+through Jamendo and Daniel Bautista.
+
+## Track 2: SNEAKERS 128BPM [MELODIC_DATA_STREAM]
+
+- **Artist:** GloryToTheMachine
+- **Title:** SNEAKERS 128BPM [MELODIC_DATA_STREAM] - GLORYTOTHEMACHINE
+- **Source:** https://freesound.org/people/GloryToTheMachine/sounds/843594/
+- **License:** CC-BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+- **Files:**
+  - `glorytothemachine-sneakers-128bpm.mp3` (original)
+  - `glorytothemachine-sneakers-128bpm.wav`
+  - `glorytothemachine-sneakers-128bpm.ogg`
+  - `glorytothemachine-sneakers-128bpm.aiff`
+
+**Usage:** Testing purposes only under CC-BY 4.0 license.
+
+---
+
+## Attribution Requirements
+
+When using these files, proper attribution must be given as specified by the CC-BY 4.0 license.
+
+## Purpose
+
+These audio files are included for:
+- Integration testing of audio decoders (WAV, MP3, OGG, AIFF)
+- Testing audio resampling functionality
+- Performance profiling and benchmarking
+- Example code demonstrations
+
+Not intended for distribution or commercial use beyond testing this library.

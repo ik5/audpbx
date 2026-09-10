@@ -3,12 +3,14 @@
 package aiff
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 
 	"github.com/go-audio/aiff"
 	goaudio "github.com/go-audio/audio"
 	"github.com/ik5/audpbx/audio"
+	"github.com/ik5/audpbx/utils"
 )
 
 // aiffReader is an interface for aiff.Decoder to allow testing
@@ -24,6 +26,14 @@ type source struct {
 	channels   int
 	bitDepth   int
 	intBuf     *goaudio.IntBuffer
+
+	// pcm reads the raw bytes of the SSND chunk when the underlying decoder
+	// exposes it. Decoding those bytes here avoids PCMBuffer's four
+	// allocations per call and its []int intermediate, which is four times
+	// wider than the samples it carries. When pcm is nil (a decoder that only
+	// offers PCMBuffer, such as a test double) ReadSamples falls back.
+	pcm io.Reader
+	raw []byte
 }
 
 func (s *source) SampleRate() int { return s.sampleRate }
@@ -33,7 +43,7 @@ func (s *source) BufSize() int {
 	if s.intBuf != nil {
 		return cap(s.intBuf.Data)
 	}
-	return 4096
+	return audio.DefaultBufSize
 }
 
 func (s *source) ReadSamples(dst []float32) (int, error) {
@@ -41,6 +51,49 @@ func (s *source) ReadSamples(dst []float32) (int, error) {
 		return 0, nil
 	}
 
+	if s.pcm != nil && s.bitDepth == utils.BitDepth16 {
+		return s.readRaw(dst)
+	}
+
+	return s.readViaPCMBuffer(dst)
+}
+
+// readRaw decodes 16-bit big-endian samples straight out of the SSND chunk.
+func (s *source) readRaw(dst []float32) (int, error) {
+	need := len(dst) * utils.BytesPerSample16
+	if cap(s.raw) < need {
+		s.raw = make([]byte, need)
+	}
+	buf := s.raw[:need]
+
+	n, err := io.ReadFull(s.pcm, buf)
+	switch {
+	case err == io.EOF || err == io.ErrUnexpectedEOF:
+		err = io.EOF
+	case err != nil:
+		return 0, fmt.Errorf("reading pcm data: %w", err)
+	}
+
+	samples := n / utils.BytesPerSample16
+	if samples == 0 {
+		return 0, io.EOF
+	}
+
+	// AIFF PCM is big-endian.
+	for i := range samples {
+		offset := i * utils.BytesPerSample16
+		v := int16(binary.BigEndian.Uint16(buf[offset:]))
+		dst[i] = float32(v) / utils.SampleScale16
+	}
+
+	if samples < len(dst) {
+		return samples, io.EOF
+	}
+
+	return samples, err
+}
+
+func (s *source) readViaPCMBuffer(dst []float32) (int, error) {
 	// Resize buffer if needed
 	if s.intBuf == nil || cap(s.intBuf.Data) < len(dst) {
 		s.intBuf = &goaudio.IntBuffer{
@@ -64,16 +117,16 @@ func (s *source) ReadSamples(dst []float32) (int, error) {
 	// go-audio uses int format, we need to normalize based on bit depth
 	var maxVal float32
 	switch s.bitDepth {
-	case 8:
-		maxVal = 128.0
-	case 16:
-		maxVal = 32768.0
-	case 24:
-		maxVal = 8388608.0
-	case 32:
-		maxVal = 2147483648.0
+	case utils.BitDepth8:
+		maxVal = utils.SampleScale8
+	case utils.BitDepth16:
+		maxVal = utils.SampleScale16
+	case utils.BitDepth24:
+		maxVal = utils.SampleScale24
+	case utils.BitDepth32:
+		maxVal = utils.SampleScale32
 	default:
-		maxVal = 32768.0 // Default to 16-bit
+		maxVal = utils.SampleScale16 // Default to 16-bit
 	}
 
 	for i := 0; i < n; i++ {
@@ -112,7 +165,7 @@ func (Decoder) Decode(r io.Reader) (audio.Source, error) {
 	dec.ReadInfo()
 
 	// Check bit depth - only support 16-bit for now
-	if dec.BitDepth != 16 {
+	if int(dec.BitDepth) != utils.BitDepth16 {
 		return nil, ErrOnlyPCM16bitSupported
 	}
 
@@ -121,8 +174,20 @@ func (Decoder) Decode(r io.Reader) (audio.Source, error) {
 		return nil, ErrUnsupportedAiffLayout
 	}
 
+	// Advance to the sample data so the SSND chunk reader is available for the
+	// direct decode path. PCMBuffer would do this lazily; doing it here lets
+	// ReadSamples read the chunk itself. The chunk reader is bounded to the
+	// chunk and is already positioned past the SSND header, so it yields
+	// exactly the sample bytes. If this fails, pcm stays nil and ReadSamples
+	// falls back to PCMBuffer.
+	var pcm io.Reader
+	if err := dec.FwdToPCM(); err == nil && dec.PCMChunk != nil {
+		pcm = dec.PCMChunk.R
+	}
+
 	return &source{
 		dec:        dec,
+		pcm:        pcm,
 		sampleRate: format.SampleRate,
 		channels:   format.NumChannels,
 		bitDepth:   int(dec.BitDepth),
