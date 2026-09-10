@@ -8,9 +8,25 @@ import (
 	"time"
 
 	"github.com/ik5/audpbx/audio"
+	"github.com/ik5/audpbx/utils"
 )
 
-// InstrumentedResampleToMono16 is a version with detailed timing breakdowns
+// estimatedOutputSeconds mirrors the constant of the same name in
+// resample.go: how many seconds of output to pre-allocate before reading.
+const estimatedOutputSeconds = 30
+
+// InstrumentedResampleToMono16 is a copy of audpbx.ResampleToMono16 with
+// per-stage timing added.
+//
+// Keep it in step with resample.go. Its whole purpose is to attribute time
+// within that function, so if the two drift apart the numbers it reports stop
+// describing the code that actually runs.
+//
+// Note that the read stage measured here covers the entire pipeline beneath it
+// — mono mixing, resampling, and decoding — because those are pull-based and
+// only do work when ReadSamples is called. A high "ReadSamples" figure is
+// therefore expected; use a CPU profile to see which layer inside it is
+// responsible.
 func InstrumentedResampleToMono16(src audio.Source, targetRate int, bufferSize int) ([]int16, int, error) {
 	timings := make(map[string]time.Duration)
 	var totalStart = time.Now()
@@ -19,7 +35,7 @@ func InstrumentedResampleToMono16(src audio.Source, targetRate int, bufferSize i
 	setupStart := time.Now()
 	resampler := audio.NewResampler(src, targetRate)
 	mono := audio.NewMonoMixer(resampler)
-	estimatedSamples := targetRate * 2
+	estimatedSamples := targetRate * estimatedOutputSeconds
 	pcm16 := make([]int16, 0, estimatedSamples)
 	buf := make([]float32, bufferSize)
 	timings["setup"] = time.Since(setupStart)
@@ -56,15 +72,9 @@ func InstrumentedResampleToMono16(src audio.Source, targetRate int, bufferSize i
 			convStart := time.Now()
 			startIdx := len(pcm16)
 			pcm16 = pcm16[:startIdx+n]
-			const maxInt16 float32 = 32768.0
-			for i := range n {
-				x := buf[i]
-				if x > 1 {
-					x = 1
-				} else if x < -1 {
-					x = -1
-				}
-				pcm16[startIdx+i] = int16(x * maxInt16)
+			out := pcm16[startIdx : startIdx+n]
+			for i, x := range buf[:n] {
+				out[i] = utils.Float32ToInt16(x)
 			}
 			conversionTime += time.Since(convStart)
 		}

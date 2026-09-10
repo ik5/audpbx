@@ -7,6 +7,8 @@ import (
 	"io"
 	"math"
 	"testing"
+
+	"github.com/ik5/audpbx/internal/audiotest"
 )
 
 func TestResampler_Metadata(t *testing.T) {
@@ -226,58 +228,71 @@ func TestResampler_InvalidDstSize(t *testing.T) {
 	}
 }
 
+// drainResampler resamples src to dstRate until the stream ends.
+//
+// The resampler is constructed per call, which matters: a Resampler tracks its
+// own end-of-stream state, so resetting only the source and reusing the
+// resampler across benchmark iterations would leave every iteration after the
+// first returning io.EOF immediately — timing an early return rather than the
+// work.
+func drainResampler(src *audiotest.MockSource, dstRate int, buf []float32) {
+	src.Reset()
+	resampler := NewResampler(src, dstRate)
+
+	for {
+		_, err := resampler.ReadSamples(buf)
+		if err != nil {
+			return
+		}
+	}
+}
+
 // BenchmarkResampler_Downsample benchmarks downsampling 44.1kHz -> 8kHz
 func BenchmarkResampler_Downsample(b *testing.B) {
 	src := newSineSource(44100, 2, 100000, 440.0)
-	resampler := NewResampler(src, 8000)
-	buf := make([]float32, 4096)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for range b.N {
-		src.Reset() // Reset
-		for {
-			_, err := resampler.ReadSamples(buf)
-			if err == io.EOF {
-				break
-			}
-		}
-	}
-}
-
-// BenchmarkResampler_Upsample benchmarks upsampling 8kHz -> 44.1kHz
-func BenchmarkResampler_Upsample(b *testing.B) {
-	src := newSineSource(8000, 2, 20000, 440.0)
-	resampler := NewResampler(src, 44100)
-	buf := make([]float32, 4096)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for range b.N {
-		src.Reset() // Reset
-		for {
-			_, err := resampler.ReadSamples(buf)
-			if err == io.EOF {
-				break
-			}
-		}
-	}
-}
-
-// BenchmarkResampler_ReadSamples benchmarks single ReadSamples call
-func BenchmarkResampler_ReadSamples(b *testing.B) {
-	src := newSineSource(44100, 2, 1000000, 440.0)
-	resampler := NewResampler(src, 8000)
 	buf := make([]float32, 4096)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.Reset()
-		_, _ = resampler.ReadSamples(buf)
+		drainResampler(src, 8000, buf)
+	}
+}
+
+// BenchmarkResampler_Upsample benchmarks upsampling 8kHz -> 44.1kHz
+func BenchmarkResampler_Upsample(b *testing.B) {
+	src := newSineSource(8000, 2, 20000, 440.0)
+	buf := make([]float32, 4096)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for b.Loop() {
+		drainResampler(src, 44100, buf)
+	}
+}
+
+// BenchmarkResampler_ReadSamples benchmarks a single ReadSamples call in the
+// steady state, after the first source block has been loaded.
+func BenchmarkResampler_ReadSamples(b *testing.B) {
+	// Long enough that the measured calls never reach the end of the stream.
+	src := newSineSource(44100, 2, 44100*600, 440.0)
+	resampler := NewResampler(src, 8000)
+	buf := make([]float32, 4096)
+
+	// Prime it so one-time setup is not attributed to the measured calls.
+	if _, err := resampler.ReadSamples(buf); err != nil {
+		b.Fatalf("priming ReadSamples() error = %v", err)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for b.Loop() {
+		if _, err := resampler.ReadSamples(buf); err != nil {
+			b.Fatalf("ReadSamples() error = %v", err)
+		}
 	}
 }
 
@@ -479,40 +494,29 @@ func BenchmarkResampler_MultiChannel(b *testing.B) {
 	src := newMockSource(44100, 8, 100000, func(sample int, channel int) float32 {
 		return float32(sample%100) / 100.0
 	})
-	resampler := NewResampler(src, 8000)
 	buf := make([]float32, 4096)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.Reset()
-		for {
-			_, err := resampler.ReadSamples(buf)
-			if err == io.EOF {
-				break
-			}
-		}
+		drainResampler(src, 8000, buf)
 	}
 }
 
-// BenchmarkResampler_SmallBuffer benchmarks with very small buffers
+// BenchmarkResampler_SmallBuffer benchmarks with very small buffers.
+//
+// Output buffer size should barely matter: the resampler reads its source in
+// fixed-size blocks regardless of how much the caller asks for at a time.
 func BenchmarkResampler_SmallBuffer(b *testing.B) {
 	src := newSineSource(44100, 2, 100000, 440.0)
-	resampler := NewResampler(src, 8000)
 	buf := make([]float32, 64)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for b.Loop() {
-		src.Reset()
-		for {
-			_, err := resampler.ReadSamples(buf)
-			if err == io.EOF {
-				break
-			}
-		}
+		drainResampler(src, 8000, buf)
 	}
 }
 

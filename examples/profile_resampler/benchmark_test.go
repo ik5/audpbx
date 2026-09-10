@@ -1,5 +1,21 @@
 // SPDX-License-Identifier: EPL-2.0
 
+// These benchmarks measure individual components against an in-memory source.
+//
+// IMPORTANT: they cannot detect the pipeline's most likely performance problem.
+// A mock source that copies from a slice performs no syscalls and allocates
+// nothing per call, so it hides exactly the costs that dominate real runs:
+// per-call decoder overhead and read(2) traffic. These benchmarks reported
+// healthy numbers while the real pipeline ran ~40x slower than ffmpeg, because
+// the resampler was pulling one frame at a time from the decoder and the
+// decoder was issuing one syscall per 4 bytes.
+//
+// Use these to compare component-level changes. To measure the pipeline, use
+// the real-file benchmarks in internal/perfbench, which decode actual files:
+//
+//	go test ./internal/perfbench/ -bench . -benchtime 3x
+//
+// See PROFILING_GUIDE.md for the full case study.
 package main
 
 import (
@@ -10,7 +26,8 @@ import (
 	"github.com/ik5/audpbx/utils"
 )
 
-// Mock source for testing
+// mockSource is an in-memory audio.Source. See the package comment above for
+// why benchmarks built on it cannot see I/O or decoder call overhead.
 type mockSource struct {
 	rate     int
 	channels int
