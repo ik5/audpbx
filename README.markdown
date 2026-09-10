@@ -859,9 +859,38 @@ The following features are planned:
 * [ ] Support Opus format.
 * [ ] Support AAC format (as binding with static linking, static building, dynamic library - building based on tags).
 * [ ] Additional audio test files for each format.
-* [ ] Replace the one-pole anti-aliasing filter with a polyphase FIR, so
-      downsampling attenuates above the output Nyquist properly (see
-      [Limitations](#limitations)).
+* [ ] **Selectable resampling algorithm.** Allow the caller to choose the
+      resampling method rather than hard-coding cubic interpolation, trading
+      throughput against fidelity per use case:
+
+  | Method | Characteristics |
+  |--------|-----------------|
+  | Linear | Cheapest; adequate when the source is already band-limited or when latency dominates |
+  | Cubic (Catmull-Rom) | Current behaviour; good general-purpose default |
+  | Polyphase FIR | Highest fidelity; proper band-limiting for large decimation ratios |
+
+  Design notes for whoever picks this up:
+
+  - Cubic should remain the default so existing callers are unaffected. A
+    functional option on `NewResampler` (for example `WithInterpolator`) keeps
+    the current signature valid.
+  - The polyphase option also resolves the anti-aliasing shortfall described
+    under [Limitations](#limitations), which cannot be addressed by retuning
+    the existing one-pole filter. A polyphase FIR performs band-limiting and
+    rate conversion in a single operation, so it replaces both the cubic
+    interpolator and the one-pole filter rather than being layered on top of
+    them.
+  - Common telephony conversions are exact rational ratios (44.1 kHz to 8 kHz
+    is 441/80), so a polyphase implementation can precompute one coefficient
+    set per phase and evaluate only the output samples actually required.
+  - Selecting a method changes output samples. The bit-exact comparisons and
+    the quality measurements in
+    [examples/profile_resampler/PROFILING_GUIDE.md](examples/profile_resampler/PROFILING_GUIDE.md)
+    should be extended to cover each method independently.
+
+  This is a design placeholder only; implementation is deliberately out of
+  scope for the current branch.
+
 * [ ] Accept `WAVE_FORMAT_EXTENSIBLE` WAV files, and bit depths other than 16.
 * [ ] Close the MP3 and Ogg decode gap, which needs work in (or replacement of)
       the upstream decoders.
