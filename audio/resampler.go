@@ -9,6 +9,46 @@ import (
 	"github.com/ik5/audpbx/utils"
 )
 
+// resamplerBlockFrames is how many source frames the resampler pulls from the
+// underlying Source per read.
+//
+// This constant is the difference between "fast" and "unusably slow". Pulling
+// one frame at a time means one Source.ReadSamples call — and, for a decoder
+// sitting on an unbuffered file, one read(2) syscall plus a handful of
+// allocations — for every single source frame. A 100 second 44.1 kHz stereo
+// file is 4.4 million frames, so the per-call overhead completely dominates the
+// arithmetic. Reading in blocks amortises all of it away.
+const resamplerBlockFrames = 8192
+
+// resamplerHistoryFrames is the number of frames kept behind the current
+// position so cubic interpolation always has its y0 neighbour.
+const resamplerHistoryFrames = 1
+
+// resamplerLookaheadFrames is the number of frames kept ahead of the current
+// position so cubic interpolation always has its y2 and y3 neighbours.
+const resamplerLookaheadFrames = 2
+
+// resamplerFilterPrimeFrames is the number of leading source frames that bypass
+// the anti-aliasing filter while its state primes.
+const resamplerFilterPrimeFrames = 3
+
+// downsampleRatioThreshold is the srcRate/dstRate ratio above which the output
+// rate can no longer carry the source bandwidth, so anti-alias filtering is
+// needed. A ratio at or below unity is upsampling, which cannot alias.
+const downsampleRatioThreshold = 1.0
+
+// defaultFilterAlpha is the coefficient of the one-pole anti-aliasing low-pass
+// applied when downsampling: out = alpha*in + (1-alpha)*prev.
+//
+// It is a fixed coefficient rather than one derived from the resampling ratio,
+// so the cutoff does not track the output Nyquist frequency and attenuates far
+// less than a proper decimation filter would at large ratios.
+const defaultFilterAlpha float32 = 0.5
+
+// unityGain is the full-scale filter coefficient, used to split the one-pole
+// low-pass between its input and its retained state.
+const unityGain float32 = 1.0
+
 // Resampler streams from src to target sample rate using cubic interpolation.
 //
 // Resampling changes the sample rate (number of audio measurements per second) of
@@ -24,6 +64,7 @@ import (
 // Features:
 //   - Works on interleaved samples; preserves channel count
 //   - Includes basic anti-aliasing filtering when downsampling to prevent artifacts
+//   - Reads the source in large blocks, so decoder call overhead is amortised
 //   - Zero allocations after initialization for optimal performance
 //
 // Example:
@@ -39,23 +80,24 @@ type Resampler struct {
 	ratio    float64 // srcRate / dstRate - how many source samples per output sample
 	channels int
 
-	// Ring buffer holding 4 frames for cubic interpolation
-	// frames[0] = t-1, frames[1] = t0, frames[2] = t+1, frames[3] = t+2
-	frames   [4][]float32
-	hasFrame [4]bool
+	// in is a sliding window of interleaved source frames. The frame at buffer
+	// offset b holds absolute source frame inBase+b.
+	//
+	// inBase starts at -1, and offset 0 is seeded with a copy of source frame 0.
+	// That synthetic frame is the y0 neighbour for the very first output frame,
+	// which keeps the interpolation loop free of start-of-stream branches.
+	in       []float32
+	inFrames int   // frames currently resident in in
+	inBase   int64 // absolute source frame index of in's first frame
 
-	// Current position in source stream (absolute frame index in source)
-	// This represents which source frame we're currently at
-	srcPosition int
+	// srcFramesRead counts real frames pulled from src, excluding the synthetic
+	// history frame and any end-of-stream padding.
+	srcFramesRead int64
 
-	// Number of output frames generated so far
-	outFramesGenerated int
+	// outFrame is the index of the next output frame to generate.
+	outFrame int64
 
-	// Total source frames read from input
-	srcFramesRead int
-
-	// Buffer for reading from source
-	srcBuf []float32
+	primed bool
 	eof    bool
 
 	// Simple low-pass filter state for anti-aliasing (when downsampling)
@@ -69,32 +111,29 @@ func NewResampler(src Source, dstRate int) *Resampler {
 	ratio := float64(src.SampleRate()) / float64(dstRate)
 
 	// Enable simple low-pass filter when downsampling
-	useFilter := ratio > 1.0
+	useFilter := ratio > downsampleRatioThreshold
 	var filterAlpha float32
 	if useFilter {
 		// Simple one-pole low-pass filter
-		filterAlpha = 0.5
+		filterAlpha = defaultFilterAlpha
 	}
 
-	r := &Resampler{
+	// The window has to hold a full block plus the interpolator's neighbours on
+	// either side, so a refill never has to split a block.
+	windowFrames := resamplerBlockFrames + resamplerHistoryFrames + resamplerLookaheadFrames
+
+	return &Resampler{
 		src:         src,
 		srcRate:     float64(src.SampleRate()),
 		dstRate:     float64(dstRate),
 		ratio:       ratio,
 		channels:    channels,
-		srcBuf:      make([]float32, 4096),
-		srcPosition: 0,
+		in:          make([]float32, windowFrames*channels),
+		inBase:      -resamplerHistoryFrames,
 		useFilter:   useFilter,
 		filterAlpha: filterAlpha,
 		filterState: make([]float32, channels),
 	}
-
-	// Initialize frame buffers
-	for i := range r.frames {
-		r.frames[i] = make([]float32, channels)
-	}
-
-	return r
 }
 
 func (r *Resampler) SampleRate() int { return int(r.dstRate) }
@@ -109,179 +148,255 @@ func (r *Resampler) Close() error {
 	return nil
 }
 
-// readSourceFrameInto reads one frame from source into dst, applies filtering
-func (r *Resampler) readSourceFrameInto(dst []float32) (bool, error) {
-	if r.eof {
-		return false, io.EOF
-	}
-
-	n, err := r.src.ReadSamples(r.srcBuf[:r.channels])
-	if n > 0 {
-		copy(dst, r.srcBuf[:n])
-
-		// Apply simple low-pass filter if downsampling
-		if r.useFilter {
-			for c := 0; c < r.channels; c++ {
-				dst[c] = r.filterAlpha*dst[c] + (1-r.filterAlpha)*r.filterState[c]
-				r.filterState[c] = dst[c]
-			}
-		}
-
-		r.srcFramesRead++
-		return true, err
-	}
-
-	if err == io.EOF {
-		r.eof = true
-	}
-	return false, err
+// windowLast returns the highest absolute source frame index resident in in.
+func (r *Resampler) windowLast() int64 {
+	return r.inBase + int64(r.inFrames) - 1
 }
 
-// ensureFrames makes sure we have frames loaded around the current source position
-func (r *Resampler) ensureFrames() error {
-	// We need frames for indices: srcPosition-1, srcPosition, srcPosition+1, srcPosition+2
-	// These map to frames[0], frames[1], frames[2], frames[3]
+// pull appends source frames to the free space at the end of in, applying the
+// anti-aliasing filter to each new frame. It reads until the window is full or
+// the source is exhausted, so a single call replaces thousands of one-frame
+// reads.
+func (r *Resampler) pull() error {
+	channels := r.channels
+	capFrames := len(r.in) / channels
 
-	// On first call, load initial frames
-	if !r.hasFrame[0] {
-		// Load first 3 source frames
-		// Note: We read directly here to initialize filter state properly
-		for i := 0; i < 3; i++ {
-			if r.eof {
-				break
-			}
+	for r.inFrames < capFrames && !r.eof {
+		offset := r.inFrames * channels
 
-			n, err := r.src.ReadSamples(r.srcBuf[:r.channels])
-			if n > 0 {
-				copy(r.frames[i+1], r.srcBuf[:n])
-				r.hasFrame[i+1] = true
-				r.srcFramesRead++
+		n, err := r.src.ReadSamples(r.in[offset:])
 
-				// Initialize filter state with first sample (don't apply filter yet)
-				if i == 0 && r.useFilter {
-					copy(r.filterState, r.srcBuf[:n])
-				}
-			}
-			if err == io.EOF {
-				if i == 0 {
-					return io.EOF // No data at all
-				}
-				// Pad with last valid frame
-				for j := i + 1; j < 4; j++ {
-					copy(r.frames[j], r.frames[i])
-					r.hasFrame[j] = true
-				}
-				break
-			} else if err != nil {
-				return err
-			}
+		// A source that hands back a partial frame would desynchronise the
+		// interleaving, so leave the remainder for the next read.
+		n -= n % channels
+
+		if n > 0 {
+			frames := n / channels
+			r.filterFrames(r.inFrames, frames)
+			r.inFrames += frames
+			r.srcFramesRead += int64(frames)
 		}
 
-		// frames[0] is padding (duplicate of frames[1])
-		copy(r.frames[0], r.frames[1])
-		r.hasFrame[0] = true
-		return nil
+		if err == io.EOF {
+			r.eof = true
+			break
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if n == 0 {
+			// The source produced nothing yet did not report EOF. Treat it as
+			// the end of the stream rather than spinning forever.
+			r.eof = true
+			break
+		}
 	}
 
 	return nil
 }
 
-// shiftFramesAndLoad shifts frames left and loads the next source frame
-func (r *Resampler) shiftFramesAndLoad() error {
-	// Shift frames: [0,1,2,3] -> [1,2,3,?]
-	copy(r.frames[0], r.frames[1])
-	copy(r.frames[1], r.frames[2])
-	copy(r.frames[2], r.frames[3])
-	r.hasFrame[0] = r.hasFrame[1]
-	r.hasFrame[1] = r.hasFrame[2]
-	r.hasFrame[2] = r.hasFrame[3]
+// filterFrames applies the one-pole anti-aliasing low-pass to frames
+// [atFrame, atFrame+count) of the window, in place.
+//
+// The first resamplerFilterPrimeFrames source frames pass through unfiltered
+// and only frame 0 seeds the filter state, which is what the original
+// frame-at-a-time implementation did.
+func (r *Resampler) filterFrames(atFrame, count int) {
+	if !r.useFilter || count == 0 {
+		return
+	}
 
-	// Try to load new frame into frames[3]
-	ok, err := r.readSourceFrameInto(r.frames[3])
-	if ok {
-		r.hasFrame[3] = true
+	channels := r.channels
+	absolute := r.inBase + int64(atFrame)
+
+	// Walk past the unfiltered prime region, seeding the state from frame 0.
+	for count > 0 && absolute < resamplerFilterPrimeFrames {
+		if absolute == 0 {
+			offset := atFrame * channels
+			copy(r.filterState, r.in[offset:offset+channels])
+		}
+		absolute++
+		atFrame++
+		count--
+	}
+
+	if count == 0 {
+		return
+	}
+
+	alpha := r.filterAlpha
+	beta := unityGain - alpha
+	offset := atFrame * channels
+	end := offset + count*channels
+
+	// Mono and stereo are the overwhelmingly common cases and are worth keeping
+	// out of the inner per-channel loop.
+	switch channels {
+	case LayoutMono.ChannelCount():
+		state := r.filterState[0]
+		for i := offset; i < end; i++ {
+			state = alpha*r.in[i] + beta*state
+			r.in[i] = state
+		}
+		r.filterState[0] = state
+	case LayoutStereo.ChannelCount():
+		left, right := r.filterState[0], r.filterState[1]
+		for i := offset; i < end; i += LayoutStereo.ChannelCount() {
+			left = alpha*r.in[i] + beta*left
+			right = alpha*r.in[i+1] + beta*right
+			r.in[i] = left
+			r.in[i+1] = right
+		}
+		r.filterState[0], r.filterState[1] = left, right
+	default:
+		for i := offset; i < end; i += channels {
+			for c := range channels {
+				state := alpha*r.in[i+c] + beta*r.filterState[c]
+				r.in[i+c] = state
+				r.filterState[c] = state
+			}
+		}
+	}
+}
+
+// prime loads the first block and seeds the synthetic history frame at offset 0.
+func (r *Resampler) prime() error {
+	r.primed = true
+
+	// Reserve offset 0 for the history copy of source frame 0; pull fills in
+	// from offset 1 onward.
+	r.inFrames = resamplerHistoryFrames
+
+	if err := r.pull(); err != nil {
+		return err
+	}
+
+	if r.srcFramesRead == 0 {
+		return io.EOF
+	}
+
+	channels := r.channels
+	first := resamplerHistoryFrames * channels
+	copy(r.in[:first], r.in[first:first+channels])
+
+	return nil
+}
+
+// slide repositions the window so that absolute source frames idx-1 through
+// idx+2 — the four samples cubic interpolation needs — are all resident.
+func (r *Resampler) slide(idx int64) error {
+	channels := r.channels
+	need := idx + resamplerLookaheadFrames
+
+	if need <= r.windowLast() {
 		return nil
 	}
 
-	// EOF or error - duplicate frames[2] into frames[3]
-	if r.hasFrame[2] {
-		copy(r.frames[3], r.frames[2])
-		r.hasFrame[3] = true
-	} else {
-		r.hasFrame[3] = false
+	first := idx - resamplerHistoryFrames
+
+	// With an extreme ratio a single output step can jump clean past the
+	// window. Discard whole windows of source until the target is reachable.
+	for !r.eof && first > r.windowLast() {
+		r.inBase += int64(r.inFrames)
+		r.inFrames = 0
+		if err := r.pull(); err != nil {
+			return err
+		}
 	}
 
-	return err
+	// Drop the frames we have moved past, making room for the next block.
+	if drop := first - r.inBase; drop > 0 {
+		if int(drop) >= r.inFrames {
+			r.inBase += int64(r.inFrames)
+			r.inFrames = 0
+		} else {
+			copy(r.in, r.in[int(drop)*channels:r.inFrames*channels])
+			r.inFrames -= int(drop)
+			r.inBase = first
+		}
+	}
+
+	if err := r.pull(); err != nil {
+		return err
+	}
+
+	// At end of stream, clamp: repeat the last real frame so the interpolator
+	// still sees four samples.
+	if r.eof && r.inFrames > 0 {
+		last := (r.inFrames - 1) * channels
+		capFrames := len(r.in) / channels
+		for r.windowLast() < need && r.inFrames < capFrames {
+			offset := r.inFrames * channels
+			copy(r.in[offset:offset+channels], r.in[last:last+channels])
+			r.inFrames++
+		}
+	}
+
+	return nil
 }
 
 // ReadSamples produces dst samples at r.dstRate.
 // dst length should be a multiple of r.channels.
 func (r *Resampler) ReadSamples(dst []float32) (int, error) {
-	if len(dst)%r.channels != 0 {
+	channels := r.channels
+
+	if len(dst)%channels != 0 {
 		return 0, ErrInvalidDstSize
 	}
 
-	// Ensure initial frames are loaded
-	if err := r.ensureFrames(); err != nil {
-		return 0, err
+	if !r.primed {
+		if err := r.prime(); err != nil {
+			return 0, err
+		}
 	}
 
+	framesNeeded := len(dst) / channels
 	written := 0
-	framesNeeded := len(dst) / r.channels
 
 	for written < framesNeeded {
-		// Calculate which source position this output frame should sample from
-		srcPosFloat := float64(r.outFramesGenerated) * r.ratio
-
-		// Integer part is the source frame index, fractional part is position within
-		srcFrameIdx := int(srcPosFloat)
+		// Calculate which source position this output frame should sample from.
+		// Integer part is the source frame index, fractional part is position
+		// within it.
+		srcPosFloat := float64(r.outFrame) * r.ratio
+		srcFrameIdx := int64(srcPosFloat)
 		alpha := float32(srcPosFloat - float64(srcFrameIdx))
 
-		// If we've moved to a new source frame, shift our window
-		for srcFrameIdx > r.srcPosition && !r.eof {
-			if err := r.shiftFramesAndLoad(); err != nil {
-				if err != io.EOF {
-					return written * r.channels, err
-				}
-				// EOF reached, stop shifting
-				break
+		if err := r.slide(srcFrameIdx); err != nil {
+			if written == 0 {
+				return 0, err
 			}
-			r.srcPosition++
+			return written * channels, err
 		}
 
-		// If at EOF and we need a source frame beyond what we've read, stop
-		// We can interpolate up to the last frame we read
-		if r.eof && srcFrameIdx >= r.srcFramesRead-1 {
-			// Check if this position is actually beyond our data
-			if srcPosFloat >= float64(r.srcFramesRead-1)+1.0 {
-				if written == 0 {
-					return 0, io.EOF
-				}
-				return written * r.channels, io.EOF
-			}
-		}
-
-		// Check we have valid frames for interpolation
-		if !r.hasFrame[1] || !r.hasFrame[2] {
+		// Once the source is exhausted, stop as soon as the read position walks
+		// past the last real frame.
+		if r.eof && srcPosFloat >= float64(r.srcFramesRead) {
 			if written == 0 {
 				return 0, io.EOF
 			}
-			return written * r.channels, io.EOF
+			return written * channels, io.EOF
 		}
 
-		// Perform cubic interpolation
-		for c := 0; c < r.channels; c++ {
-			y0 := r.frames[0][c]
-			y1 := r.frames[1][c]
-			y2 := r.frames[2][c]
-			y3 := r.frames[3][c]
+		// Offset of y1 (the frame at srcFrameIdx). y0 sits one frame behind it,
+		// which the synthetic history frame guarantees is in range.
+		y1 := int(srcFrameIdx-r.inBase) * channels
+		y0 := y1 - channels
+		y2 := y1 + channels
+		y3 := y2 + channels
+		out := written * channels
 
-			dst[written*r.channels+c] = utils.CubicInterpolate(y0, y1, y2, y3, alpha)
+		// Perform cubic interpolation
+		for c := range channels {
+			dst[out+c] = utils.CubicInterpolate(
+				r.in[y0+c], r.in[y1+c], r.in[y2+c], r.in[y3+c], alpha,
+			)
 		}
 
 		written++
-		r.outFramesGenerated++
+		r.outFrame++
 	}
 
-	return written * r.channels, nil
+	return written * channels, nil
 }

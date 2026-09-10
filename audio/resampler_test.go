@@ -3,6 +3,7 @@
 package audio
 
 import (
+	"fmt"
 	"io"
 	"math"
 	"testing"
@@ -511,6 +512,177 @@ func BenchmarkResampler_SmallBuffer(b *testing.B) {
 			if err == io.EOF {
 				break
 			}
+		}
+	}
+}
+
+// TestResampler_ZeroAllocsSteadyState guards the property the doc comment
+// promises: once the first block is loaded, streaming allocates nothing.
+//
+// The resampler used to pull one frame per Source.ReadSamples call, which meant
+// the decoders underneath allocated several times per audio frame. Reading in
+// blocks is what makes zero steady-state allocation possible, so a regression
+// here means the block reads have been undone.
+func TestResampler_ZeroAllocsSteadyState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping allocation test in short mode")
+	}
+
+	// Long enough that the sampled runs below never reach EOF.
+	src := newSineSource(44100, 2, 44100*20, 440.0)
+	resampler := NewResampler(src, 8000)
+	buf := make([]float32, 4096)
+
+	// Prime the pipeline so one-time setup is not counted.
+	if _, err := resampler.ReadSamples(buf); err != nil && err != io.EOF {
+		t.Fatalf("priming ReadSamples() error = %v", err)
+	}
+
+	allocs := testing.AllocsPerRun(20, func() {
+		if _, err := resampler.ReadSamples(buf); err != nil && err != io.EOF {
+			t.Fatalf("ReadSamples() error = %v", err)
+		}
+	})
+
+	if allocs > 0 {
+		t.Errorf("Resampler.ReadSamples allocated %v times in steady state, want 0", allocs)
+	}
+}
+
+// collectResampled reads a resampler to exhaustion using dst buffers of
+// bufFrames frames, returning every sample produced.
+func collectResampled(t *testing.T, src Source, dstRate, bufFrames int) []float32 {
+	t.Helper()
+
+	resampler := NewResampler(src, dstRate)
+	buf := make([]float32, bufFrames*src.Channels())
+
+	var out []float32
+
+	for {
+		n, err := resampler.ReadSamples(buf)
+		if n > 0 {
+			out = append(out, buf[:n]...)
+		}
+
+		if err == io.EOF {
+			return out
+		}
+
+		if err != nil {
+			t.Fatalf("ReadSamples() error = %v", err)
+		}
+	}
+}
+
+// TestResampler_BufferSizeIndependence checks that the output depends only on
+// the input and the rates, never on how much the caller asks for per read.
+//
+// This is the invariant that the internal sliding window can most easily
+// break: the read sizes below deliberately straddle the block boundary, so an
+// off-by-one when the window slides or pads shows up as a mismatch rather than
+// as a subtle glitch nobody notices.
+func TestResampler_BufferSizeIndependence(t *testing.T) {
+	t.Parallel()
+
+	bufSizes := []int{1, 2, 7, 64, 1000, 4096, 8191, 8192, 8193, 16387}
+
+	tests := []struct {
+		name     string
+		channels int
+		srcRate  int
+		dstRate  int
+		frames   int
+	}{
+		{"downsample stereo 44.1k to 8k", 2, 44100, 8000, 60000},
+		{"upsample mono 8k to 44.1k", 1, 8000, 44100, 5000},
+		{"same rate stereo", 2, 48000, 48000, 20000},
+		{"extreme downsample mono", 1, 44100, 300, 50000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			newSrc := func() Source {
+				return newSineSource(tt.srcRate, tt.channels, tt.frames*tt.channels, 440.0)
+			}
+
+			want := collectResampled(t, newSrc(), tt.dstRate, bufSizes[0])
+
+			for _, bufFrames := range bufSizes[1:] {
+				got := collectResampled(t, newSrc(), tt.dstRate, bufFrames)
+
+				if len(got) != len(want) {
+					t.Fatalf("bufFrames=%d produced %d samples, want %d",
+						bufFrames, len(got), len(want))
+				}
+
+				for i := range want {
+					if got[i] != want[i] {
+						t.Fatalf("bufFrames=%d: sample %d = %v, want %v",
+							bufFrames, i, got[i], want[i])
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestResampler_IdentityRateIsExact checks the strongest property a resampler
+// has: when the source and target rates are equal, every output sample must
+// equal its input sample, including the first and the last.
+//
+// At a 1:1 ratio the interpolation fraction is always zero, so Catmull-Rom
+// reduces to y1 — the sample itself. Any deviation means the window is
+// misaligned with the position it is supposed to represent.
+//
+// This catches two defects that the previous frame-at-a-time implementation
+// had, both at the edges of the stream, where a lenient "n >= 0" assertion on a
+// silent source cannot see them:
+//   - the final frame was emitted as a duplicate of the previous frame, losing
+//     the true last frame
+//   - a source whose first read returned data together with io.EOF was dropped
+//     entirely, yielding no output at all
+func TestResampler_IdentityRateIsExact(t *testing.T) {
+	t.Parallel()
+
+	const rate = 8000
+
+	for _, channels := range []int{1, 2, 3} {
+		for _, frames := range []int{1, 2, 3, 4, 5, 64, 5000} {
+			name := fmt.Sprintf("channels=%d frames=%d", channels, frames)
+
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				// Distinct, exactly representable values so any duplication or
+				// off-by-one is visible rather than plausible.
+				want := make([]float32, frames*channels)
+				for i := range want {
+					want[i] = float32(i+1) / 65536.0
+				}
+
+				// MockSource counts its third argument in frames, and passes
+				// the frame index to the waveform callback.
+				src := newMockSource(rate, channels, frames,
+					func(frame, channel int) float32 {
+						return want[frame*channels+channel]
+					})
+
+				got := collectResampled(t, src, rate, 64)
+
+				if len(got) != len(want) {
+					t.Fatalf("produced %d samples, want %d", len(got), len(want))
+				}
+
+				for i := range want {
+					if got[i] != want[i] {
+						t.Fatalf("sample %d = %v, want %v (frame %d, channel %d)",
+							i, got[i], want[i], i/channels, i%channels)
+					}
+				}
+			})
 		}
 	}
 }
