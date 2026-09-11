@@ -5,6 +5,32 @@
 
 **audpbx** is a high-performance Go library for audio processing, specializing in format conversion, resampling, and channel mixing. Designed for telephony and VoIP applications, it provides efficient tools for converting various audio formats to mono 16-bit PCM at any sample rate.
 
+## Scope
+
+**audpbx is an audio manipulation library.** It resamples, filters, mixes,
+splits, converts and analyses audio, and it provides the abstractions that let
+audio flow through a processing pipeline.
+
+**It does not implement codecs.** Codec implementations are external
+dependencies that audpbx imports and wraps — see
+[Dependencies](#dependencies). Adding support for a format or codec means
+integrating an existing implementation behind a common interface, not writing
+compression or decompression algorithms here.
+
+What that means in practice:
+
+| audpbx does | audpbx delegates |
+|-------------|------------------|
+| Resampling, mixing, gain, filtering, analysis | Codec compression and decompression |
+| Container and header parsing, metadata | The signal processing inside a codec |
+| Tone generation, composition, channel routing | |
+| The `Source`, `Decoder` and registry abstractions | |
+| Thin wrappers adapting third-party codecs to them | |
+
+A consequence worth knowing: where decode throughput or codec quality is
+limited, the limit usually lives in the upstream decoder rather than in audpbx.
+See [Performance](#performance) and [Limitations](#limitations).
+
 ## Features
 
 - **Multiple Format Support**: Decode WAV, MP3, Ogg Vorbis, and AIFF audio files
@@ -15,7 +41,7 @@
 - **High-Level API**: Powerful ProcessChannels function with flexible options (similar to pydub)
 - **Performance Optimized**: Near-zero allocations, optimized for throughput
 - **Simple API**: Clean, idiomatic Go interfaces
-- **Streaming Support**: Process audio without loading entire files into memory
+- **Streaming Support**: Decoding and the processing pipeline are streaming; note that `ResampleToMono16` and normalization currently collect their results in memory
 - **Comprehensive Testing**: Extensive unit tests and benchmarks
 - **Beginner-Friendly Documentation**: Detailed explanations of audio concepts for newcomers
 
@@ -193,8 +219,9 @@ Worth knowing before you adopt this:
   on a 6 kHz tone resampled 44.1 kHz to 8 kHz, where it should vanish: audpbx
   leaves it at −27.9 dB, ffmpeg at −73.7 dB, a difference of about 46 dB. The
   surviving energy aliases down to 2 kHz. If you are downsampling music or
-  wideband speech and care about artifacts, this matters; a polyphase FIR is the
-  proper fix and is not yet implemented.
+  wideband speech and care about artifacts, this matters. A polyphase FIR is the
+  proper fix and is not yet implemented — resampling is audpbx's own work, so
+  this one is in scope (see [Scope](#scope)).
 - **WAV supports only 16-bit PCM with format tag 1.** Files using
   `WAVE_FORMAT_EXTENSIBLE` (tag `0xFFFE`), which is what `ffmpeg` emits for more
   than two channels, are rejected with an "unsupported audio format" error. So
@@ -248,7 +275,10 @@ n, err := mixer.ReadSamples(buf)
 
 ### 3. Format Support (`formats/*` packages)
 
-Decoders for various audio formats:
+Thin wrappers that adapt third-party codec libraries to the `audio.Source`
+interface. Each package handles container parsing, sample-format conversion and
+the `Source` contract; the codec itself lives in the dependency (see
+[Scope](#scope) and [Dependencies](#dependencies)).
 
 ```go
 // Each format provides a Decoder
@@ -486,7 +516,8 @@ The `ProcessChannels` function supports these options:
 - **`WithErrorHandler`**: Handle errors per channel
 - **`WithChannelMapping`**: Swap/remap channels
 - **`WithProcessor`**: Apply custom processing
-- **`WithProgress`**: Track processing progress
+- **`WithProgress`**: Accepted, but **not yet implemented** — the callback is
+  stored and never invoked, so it currently reports nothing
 - **`WithBufferSize`**: Configure buffer size
 
 ## Performance
@@ -825,11 +856,17 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 
 ## Dependencies
 
+Codec and container implementations are delegated to these libraries; audpbx
+wraps them behind `audio.Source`. See [Scope](#scope).
+
 - [github.com/go-audio/audio](https://github.com/go-audio/audio) - Audio buffer utilities
-- [github.com/go-audio/wav](https://github.com/go-audio/wav) - WAV file support
-- [github.com/go-audio/aiff](https://github.com/go-audio/aiff) - AIFF file support
+- [github.com/go-audio/wav](https://github.com/go-audio/wav) - WAV container and PCM codec
+- [github.com/go-audio/aiff](https://github.com/go-audio/aiff) - AIFF container and PCM codec
 - [github.com/hajimehoshi/go-mp3](https://github.com/hajimehoshi/go-mp3) - MP3 decoder
 - [github.com/jfreymuth/oggvorbis](https://github.com/jfreymuth/oggvorbis) - Ogg Vorbis decoder
+
+Adding a format means adding a dependency and a wrapper, not implementing a
+codec here.
 
 ## License
 
@@ -856,8 +893,11 @@ This project is a vibe coding-based package created for the following reasons:
 
 The following features are planned:
 
-* [ ] Support Opus format.
-* [ ] Support AAC format (as binding with static linking, static building, dynamic library - building based on tags).
+* [ ] Integrate Opus support. Requires choosing an implementation — a pure-Go
+      decoder or a binding — and wrapping it; see [Scope](#scope).
+* [ ] Integrate AAC support as a binding, selected by build tags (static
+      linking, static building, dynamic library). This would be the first
+      dependency requiring cgo, so it sets the precedent for future bindings.
 * [ ] Additional audio test files for each format.
 * [ ] **Selectable resampling algorithm.** Allow the caller to choose the
       resampling method rather than hard-coding cubic interpolation, trading
@@ -892,5 +932,6 @@ The following features are planned:
   scope for the current branch.
 
 * [ ] Accept `WAVE_FORMAT_EXTENSIBLE` WAV files, and bit depths other than 16.
-* [ ] Close the MP3 and Ogg decode gap, which needs work in (or replacement of)
-      the upstream decoders.
+* [ ] Evaluate faster MP3 and Ogg decoding. The throughput gap is inside the
+      upstream decoders rather than in audpbx, so the remedy is a different
+      dependency — not codec work in this project. See [Scope](#scope).

@@ -6,6 +6,10 @@ Design notes for a planned capability: turning captured RTP payloads into audio
 files, with correct timing, one output channel per call direction, and support
 for several codecs.
 
+Note on scope before reading: `audpbx` integrates codecs, it does not implement
+them — see
+[Codecs are integrated, not implemented](#scope-codecs-are-integrated-not-implemented).
+
 **Status: design only.** Nothing described here is implemented. This document
 exists to record the analysis and the decisions that need making before code is
 written.
@@ -15,6 +19,7 @@ written.
 ## Contents
 
 - [Scope](#scope)
+  - [Codecs are integrated, not implemented](#scope-codecs-are-integrated-not-implemented)
 - [Why this is not just another decoder](#why-this-is-not-just-another-decoder)
 - [What the library has and lacks today](#what-the-library-has-and-lacks-today)
 - [The timing model](#the-timing-model)
@@ -53,6 +58,30 @@ Codecs to support: **G.711** (µ-law and A-law), **Opus**, and **G.729**.
 - RTCP parsing, beyond optionally consuming Sender Reports for cross-stream
   alignment.
 - Encryption (SRTP). Payloads are assumed already decrypted.
+
+### Scope: codecs are integrated, not implemented
+
+`audpbx` is an audio manipulation library. **Codec implementations are external
+dependencies**, imported and wrapped — as WAV, MP3, Ogg Vorbis and AIFF already
+are. See [current_gaps.md](current_gaps.md#scope-what-this-project-is-and-is-not)
+for the full statement.
+
+So throughout this document, "support codec X" means three things, none of
+which is writing a codec:
+
+1. **The plug-in point** — the `PacketDecoder` interface below. This is
+   genuinely this module's work.
+2. **A thin wrapper** adapting a third-party implementation to it, handling
+   frame sizes, clock rate, sample-format conversion and loss signalling.
+3. **A dependency decision** — which implementation, under what licence, pure
+   Go or cgo, and whether a usable one exists at all.
+
+The timeline, alignment, interleaving, writers and statistics are this module's
+work and are the substance of this design. The codecs are not.
+
+What *is* in scope and does involve signal processing: the timeline and
+resampling paths, silence generation, and tone handling. Those are audio
+manipulation, which is what the library is for.
 
 ### Why batch-only matters
 
@@ -121,8 +150,8 @@ Verified against the current tree.
 
 | Gap | Detail |
 |---|---|
-| **No G.711 codec** | No µ-law or A-law companding anywhere in the tree |
-| **No Opus or G.729** | Not present in any form |
+| **No G.711 support** | No µ-law or A-law companding anywhere in the tree, and no dependency providing it |
+| **No Opus or G.729 support** | Not present in any form; neither has a dependency yet |
 | **WAV writer is mono-only** | `WriteWAV16` hardcodes `numChannels := uint16(1)`; it is a literal, not a parameter. The stereo output this feature exists to produce is impossible today. |
 | **No interleaver** | Every channel operation goes one way — `SplitToMonoSources`, `SplitChannels`, `ExtractChannels`, `MonoMixer` all split or downmix. Nothing combines N mono streams into one interleaved multi-channel stream, which is exactly what two-direction recording needs. |
 | **No timeline concept** | `audio.Source` has no notion of position or timestamp. Gap reconstruction has no home in the current model. |
@@ -146,7 +175,7 @@ the timing is where correctness is won or lost.
 
 RTP timestamps advance at the codec's **clock rate**. Converting a timestamp
 delta into a sample count requires knowing that clock rate — and it is not
-always the audio sample rate (see [Opus](#opus-dynamic-payload-type) below).
+always the audio sample rate (see [Opus](#opus--dynamic-payload-type) below).
 
 For a stream where clock rate equals sample rate, gap length is exact:
 
@@ -250,11 +279,17 @@ This is why the frame decode interface below has a distinct `Conceal` method.
 | State | Stateless |
 
 The simplest case in every respect. Timestamp delta equals sample count
-directly. Decoding is a 256-entry lookup table per variant; encoding needs the
-segment-and-mantissa logic, which is still modest.
+directly, and the codec is stateless, so a lost packet needs nothing more than
+silence.
 
 µ-law is standard in North America and Japan, A-law in Europe and most of the
 rest of the world. Both must be supported.
+
+Integration should be uncontroversial: G.711 companding is small, well
+specified, and several Go implementations exist. The work here is the wrapper
+and its conformance test, not the conversion itself — and the companding tables
+are fully enumerable (all 256 values in both directions), so the wrapper can be
+verified exhaustively.
 
 Idle/silence bytes: **`0xFF` for µ-law, `0xD5` for A-law.** Useful for gap
 filling in the raw-output path.
@@ -294,10 +329,11 @@ the anti-aliasing limitation documented in the README. Downsampling a 48 kHz
 Opus leg to 8 kHz is a 6:1 decimation, which is precisely the case where the
 present one-pole filter is weakest.
 
-Implementation options: a pure Go decoder exists (`github.com/pion/opus`) but
-its completeness should be assessed before committing; otherwise cgo bindings to
-libopus, which conflicts with this module's native-Go-first goal. Writing an
-Opus decoder from scratch is a very large undertaking and is not recommended.
+Dependency options: a pure Go decoder exists (`github.com/pion/opus`) but its
+completeness should be assessed before committing; otherwise cgo bindings to
+libopus, which conflicts with this module's native-Go-first goal. Either way the
+codec comes from a dependency — see
+[Scope: codecs are integrated, not implemented](#scope-codecs-are-integrated-not-implemented).
 
 ### G.729 — payload type 18
 
@@ -318,26 +354,39 @@ Annex B will mis-parse payloads from an endpoint that uses it, since frame size
 is no longer a constant 10 bytes. Frame type must be inferred from payload
 length.
 
-**Scale of work.** G.729 is ACELP: analysis-by-synthesis with an adaptive
-codebook, a fixed algebraic codebook, LSP quantisation and a post-filter. The
-**decoder is substantially simpler than the encoder** and is all that file
-reconstruction requires. Building the decoder first, and only adding an encoder
-if there is a concrete need, is strongly advised. This is still a serious DSP
-effort measured in weeks rather than days, and it is by far the largest item in
-this document.
+**Obtaining an implementation is the open question**, and it is the hardest
+dependency problem in this document. G.729 is CS-ACELP — a predictive codec
+with an adaptive codebook, a fixed algebraic codebook, LSP quantisation and a
+post-filter — and no pure-Go implementation is known to exist. That leaves
+three routes, all of which are dependency decisions rather than work for this
+module:
 
-**On licensing.** The core G.729 patents have expired, which is what makes an
-independent implementation practical. Two things remain worth separating:
+1. **A cgo binding** to an existing C implementation. Follows whatever
+   precedent the AAC binding sets, and gives up the native-Go property.
+2. **A separate standalone Go package** that `audpbx` then imports like any
+   other codec dependency. This keeps the codec outside this module's
+   boundary, which is where it belongs.
+3. **Leave it unsupported** until there is a concrete requirement.
 
-- **Patents** versus **the ITU-T reference source code**, which carries its own
-  licence independent of patent status. A clean-room implementation written from
-  the published Recommendation text avoids the reference-code licence question
-  entirely; deriving from the reference C does not.
+Only the decoder is needed for file reconstruction, so whichever route is
+taken, decode-only is sufficient and an encoder can wait for a real need.
+
+**On licensing**, should route 1 or 2 be pursued. The core G.729 patents have
+expired, which is what makes an independent implementation viable at all. Two
+distinctions are worth separating early rather than discovering late:
+
+- **Patents** are separate from **the ITU-T reference source code**, which
+  carries its own licence regardless of patent status. Code written from the
+  published Recommendation text is not in the same position as code derived
+  from the reference C.
 - **Annex B** (VAD/DTX/CNG) was covered by additional patents whose status
-  should be confirmed separately from the core codec.
+  should be confirmed separately from the core codec. Annex B is not really
+  optional in practice, since without it frame sizes stop being a constant
+  10 bytes and payloads from endpoints that use it will be mis-parsed.
 
-Worth confirming both against your own jurisdiction and risk posture before
-starting. Noted here so the distinction is not discovered late.
+Both should be confirmed against your own jurisdiction and risk posture. Noted
+here because it affects which of the three routes is even available, not
+because this module would be doing the implementing.
 
 ### Comparison
 
@@ -349,7 +398,7 @@ starting. Noted here so the distinction is not discovered late.
 | Frame size | none (byte stream) | 10 ms / 10 bytes | 2.5–60 ms, variable |
 | Stateful | no | yes | yes |
 | Needs PLC | no | yes | yes |
-| Implementation effort | small | **large** | large, or use a library |
+| Implementation source | several Go implementations | none known in Go; cgo or a separate project | pure-Go decoder in progress, or cgo |
 
 ---
 
@@ -399,10 +448,15 @@ clock-rate conversion business.
 ### 2. Codec packages
 
 ```
-formats/g711/     — µ-law and A-law; PacketDecoder plus an encoder
-formats/g729/     — decoder first; encoder only if needed
+formats/g711/     — wrapper: µ-law and A-law, PacketDecoder plus an encoder
+formats/g729/     — wrapper: decode only; requires a dependency decision first
 formats/opus/     — wrapper over a chosen implementation
 ```
+
+Each is a **wrapper**, not a codec. Their job is to adapt whatever
+implementation is chosen to `PacketDecoder` and `audio.Source`, and to own the
+per-codec details the interface exposes — frame sizes, clock rate (which is not
+the sample rate for Opus or G.722), and how loss is concealed.
 
 Each should also expose a plain `audio.Source` over a contiguous byte stream
 where that makes sense, so a raw `.ulaw` file on disk can be read without going
@@ -522,13 +576,14 @@ alignment reference.
 ## Suggested phasing
 
 Ordered so that each phase is independently useful and testable, and so the
-timing layer is proven before any hard DSP is attempted.
+timing layer is proven before any codec dependency is introduced.
 
 **Phase 1 — timeline, proven without any codec**
 
-Raw `.ulaw`/`.alaw` output. Byte passthrough plus silence fill, no decoding.
-This exercises deduplication, ordering, wraparound, gap computation and stats
-with zero DSP in the way. If the timeline is wrong, it is obvious here.
+Raw `.ulaw`/`.alaw` output. Byte passthrough plus silence fill, no decoding and
+no dependency. This exercises deduplication, ordering, wraparound, gap
+computation and stats with nothing else in the way. If the timeline is wrong,
+it is obvious here. This phase is entirely this module's own work.
 
 **Phase 2 — G.711 and stereo output**
 
@@ -540,19 +595,25 @@ common codec in telephony.
 
 Forces the clock-rate abstraction to be correct, since Opus is the codec where
 clock rate and sample rate diverge. Also the first case where two legs may have
-different sample rates, bringing the resampler in. Assess `pion/opus` before
-deciding build-versus-adopt.
+different sample rates, bringing the resampler in. Assess `pion/opus` for
+completeness against a cgo binding to libopus; both are adoption choices, not
+implementation work.
 
-**Phase 4 — G.729 decoder**
+**Phase 4 — G.729**
 
-Largest single item. Deliberately last: by this point the timeline, alignment,
-interleaving, writers and PLC plumbing are all proven, so the work is confined
-to the codec itself.
+Deliberately last, and gated on a dependency decision rather than on
+engineering here: no pure-Go implementation is known, so this phase starts by
+choosing between a cgo binding, a separate standalone package, and deferral. By
+this point the timeline, alignment, interleaving, writers and loss-concealment
+plumbing are all proven, so once an implementation is available the remaining
+work is a wrapper.
 
 **Phase 5 — encoders, if needed**
 
-G.711 encode for producing `.ulaw`/`.alaw` from arbitrary sources. G.729 encode
-only if there is a concrete requirement.
+G.711 encode for producing `.ulaw`/`.alaw` from arbitrary sources — again a
+wrapper over whichever implementation was adopted in Phase 2. G.729 encode only
+if there is a concrete requirement, and only if the chosen dependency provides
+one.
 
 ---
 
@@ -581,9 +642,12 @@ duration and alignment, not sample values. Specific suggestions:
   certain to appear in production.
 - **Loss and reordering.** Shuffle and drop packets; assert output duration is
   unchanged and stats report accurately.
-- **Codec vectors.** G.711 has well-known companding tables; test the full
-  256-value round trip exhaustively rather than sampling. For G.729, the ITU-T
-  test vectors are the reference — noting that using the vectors is a separate
+- **Codec vectors.** Note what these validate: not the codec, which belongs to
+  the dependency, but **this module's wrapper** — where frame sizing, clock
+  rate, bit packing, byte order and scaling errors actually occur. G.711 has
+  well-known companding tables, so test the full 256-value round trip
+  exhaustively rather than sampling. Published ITU-T vectors exist for G.729
+  and make wrapper conformance cheap to check; using the vectors is a separate
   question from deriving code from the reference implementation.
 - **Silence-fill values.** Assert the exact idle bytes (`0xFF`, `0xD5`) in raw
   output, since a wrong constant produces quiet-but-not-silent output that is
@@ -618,13 +682,16 @@ Listed roughly in the order they block work.
    higher rate, the lower rate, or refuse? Note the anti-aliasing caveat when
    downsampling.
 
-5. **Opus: build or adopt?** Assess `pion/opus` maturity against the
-   native-Go-first goal. A cgo binding to libopus would be the pragmatic choice
-   but conflicts with that goal.
+5. **Opus: which implementation?** Assess `pion/opus` maturity against the
+   native-Go-first goal. A cgo binding to libopus is the pragmatic alternative
+   but conflicts with that goal. Building one is not an option under
+   [the scope note](#scope-codecs-are-integrated-not-implemented).
 
-6. **G.729 scope.** Decoder only, or encoder too? Annex B support or core only?
-   Annex B is not optional in practice if inputs come from endpoints that use
-   it, because frame sizes stop being constant.
+6. **G.729: which route, if any?** A cgo binding, a separate standalone Go
+   package that `audpbx` imports, or leave it unsupported. Then: decode only or
+   encode too, and Annex B or core only — noting Annex B is not optional in
+   practice if inputs come from endpoints that use it, because frame sizes stop
+   being constant. Whichever route, the codec lives outside this module.
 
 7. **Where does this live?** A `voip/` package at the top level, or under
    `formats/`? The timeline and alignment logic is not a format, so `voip/`
