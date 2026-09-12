@@ -31,6 +31,53 @@ A consequence worth knowing: where decode throughput or codec quality is
 limited, the limit usually lives in the upstream decoder rather than in audpbx.
 See [Performance](#performance) and [Limitations](#limitations).
 
+### Dependency policy: native Go first
+
+**Native Go is the default, and an external (cgo) dependency is only acceptable
+when both of these hold:**
+
+1. **No suitable Go implementation exists** — neither a maintained third-party
+   package nor a reasonable one to write; and
+2. **Writing it in Go would be disproportionate effort** for a package of this
+   scope.
+
+Both tests must pass. "No Go package exists" is not on its own sufficient — if
+the thing is tractable to implement, it gets implemented in Go. Equally,
+"implementing it would be hard" is not sufficient either, if a usable Go package
+is already available.
+
+When a dependency does clear both tests, these rules apply:
+
+- **cgo lives behind build tags, never in the default build.** Building `audpbx`
+  must not require a C toolchain, a system library, or `pkg-config`.
+- **Permissive licences are preferred.** Anything with obligations that would
+  pass to downstream users — LGPL in particular — is opt-in behind a build tag
+  only. Obligations attach when a *binary* is distributed, and the party doing
+  that is the consumer of this library, so a permissive default is a choice made
+  on their behalf.
+- **Vendored source beats a linked library.** A public-domain or
+  CC0 single-header file compiled by cgo needs no system dependency, no
+  presence check and no build-tag matrix, which makes it materially cheaper than
+  linking.
+- **Maintenance status is part of the decision.** A dependency's archival status
+  and last release are checked before adoption, and re-checked as part of the
+  pre-release audit — see
+  [current_gaps.md](current_gaps.md#qa-8-no-pre-release-bug-and-security-audit).
+
+Worked examples of the rule in practice, for audio codecs:
+
+| Situation | Outcome |
+|---|---|
+| A maintained Go package exists | **Adopt it** — e.g. G.711 |
+| No suitable Go package, but the codec is tractable | **Write it in Go**, as a separate module this library imports — e.g. G.726 |
+| No Go implementation and the effort is disproportionate | **cgo behind a build tag** — e.g. G.729, where CS-ACELP is weeks of specialist DSP |
+
+Note the second row: codecs written rather than adopted live in their own
+modules, not inside `audpbx` — consistent with this library not implementing
+codecs. See
+[current_gaps.md](current_gaps.md#fmt-4-telco-and-voip-codecs-absent-user-2)
+for how each codec has been decided and why.
+
 ## Features
 
 - **Multiple Format Support**: Decode WAV, MP3, Ogg Vorbis, and AIFF audio files
@@ -883,7 +930,7 @@ This project is licensed under the **Eclipse Public License 2.0** — see the [L
 This project is a vibe coding-based package created for the following reasons:
 
 1. Allows projects such as APIs to handle common audio formats and convert them to Open Source PBX-ready audio (such as [Asterisk PBX](https://www.asterisk.org/) and [FreeSWITCH](https://signalwire.com/freeswitch)).
-2. Native Go code first (additional non-native formats will be added in the future).
+2. Native Go code first — see [Dependency policy](#dependency-policy-native-go-first) for the rule and when an external dependency is acceptable.
 3. Good documentation.
 4. Comprehensive unit testing.
 5. Zero-allocation code.
