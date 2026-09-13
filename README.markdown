@@ -63,6 +63,12 @@ When a dependency does clear both tests, these rules apply:
   and last release are checked before adoption, and re-checked as part of the
   pre-release audit — see
   [current_gaps.md](current_gaps.md#qa-8-no-pre-release-bug-and-security-audit).
+- **An archived dependency with a known security defect is not acceptable.**
+  Removing it takes precedence over feature work. Mitigating around it, or
+  documenting it as a caveat, is not sufficient: depending on unmaintained code
+  with a known unfixable flaw — and telling users about it — is worse advice
+  than not depending on it at all. An archived upstream cannot be patched, so
+  such a mitigation would be permanent rather than temporary.
 
 Worked examples of the rule in practice, for audio codecs:
 
