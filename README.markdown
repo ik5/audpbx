@@ -3,7 +3,9 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/ik5/audpbx.svg)](https://pkg.go.dev/github.com/ik5/audpbx)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ik5/audpbx)](https://goreportcard.com/report/github.com/ik5/audpbx)
 
-**audpbx** is a high-performance Go library for audio processing, specializing in format conversion, resampling, and channel mixing. Designed for telephony and VoIP applications, it provides efficient tools for converting various audio formats to mono 16-bit PCM at any sample rate.
+**audpbx** is a Go audio manipulation library: decode, encode (when an encoder exists), resample, mix, concat, and split — in-process, with no external commands (no ffmpeg, no sox).
+
+Telecom tooling is first-class (G.7xx, Opus, GSM, raw/headerless codecs, PBX file dialects, and the helpers those need). PBX is one environment in that set, not the whole set. Non-telecom conversions are allowed. All usual sample rates, both endians, and basic PCM/container formatting are in scope.
 
 ## Scope
 
@@ -48,13 +50,17 @@ is already available.
 
 When a dependency does clear both tests, these rules apply:
 
-- **cgo lives behind build tags, never in the default build.** Building `audpbx`
+- **The default build of this module does not use cgo.** Building `audpbx`
   must not require a C toolchain, a system library, or `pkg-config`.
-- **Permissive licences are preferred.** Anything with obligations that would
-  pass to downstream users — LGPL in particular — is opt-in behind a build tag
-  only. Obligations attach when a *binary* is distributed, and the party doing
-  that is the consumer of this library, so a permissive default is a choice made
-  on their behalf.
+- **Extra containers and codecs plug in from outside this tree.** Implement
+  the interface and `Register` it in your own module (or an opt-in companion
+  module). That is how this package grows without forking, and how a cgo or
+  LGPL implementation stays out of this `go.mod`. Build tags inside *this*
+  repo do not do that job.
+- **Permissive licences are required for dependencies of this package.**
+  GPL and other licences that would copyleft this library or its commercial
+  users are out. LGPL, if used at all, lives only in a separate module the
+  application imports and registers.
 - **Vendored source beats a linked library.** A public-domain or
   CC0 single-header file compiled by cgo needs no system dependency, no
   presence check and no build-tag matrix, which makes it materially cheaper than
@@ -76,7 +82,7 @@ Worked examples of the rule in practice, for audio codecs:
 |---|---|
 | A maintained Go package exists | **Adopt it** — e.g. G.711 |
 | No suitable Go package, but the codec is tractable | **Write it in Go**, as a separate module this library imports — e.g. G.726 |
-| No Go implementation and the effort is disproportionate | **cgo behind a build tag** — e.g. G.729, where CS-ACELP is weeks of specialist DSP |
+| No Go implementation and the effort is disproportionate | **cgo in a separate module, registered** — e.g. G.729, where CS-ACELP is weeks of specialist DSP |
 
 Note the second row: codecs written rather than adopted live in their own
 modules, not inside `audpbx` — consistent with this library not implementing
@@ -86,17 +92,12 @@ for how each codec has been decided and why.
 
 ## Features
 
-- **Multiple Format Support**: Decode WAV, MP3, Ogg Vorbis, and AIFF audio files
-- **High-Quality Resampling**: Cubic interpolation for sample rate conversion with minimal artifacts
-- **Advanced Channel Processing**: Split, extract, process individual channels from multi-channel audio
-- **Channel Mixing**: Convert stereo/multi-channel audio to mono with customizable mixdown
-- **Audio Effects**: Gain adjustment, normalization, channel mapping
-- **High-Level API**: Powerful ProcessChannels function with flexible options (similar to pydub)
-- **Performance Optimized**: Near-zero allocations, optimized for throughput
-- **Simple API**: Clean, idiomatic Go interfaces
-- **Streaming Support**: Decoding and the processing pipeline are streaming; note that `ResampleToMono16` and normalization currently collect their results in memory
-- **Comprehensive Testing**: Extensive unit tests and benchmarks
-- **Beginner-Friendly Documentation**: Detailed explanations of audio concepts for newcomers
+- **Decode** WAV, MP3, Ogg Vorbis, and AIFF into a streaming `audio.Source`
+- **Resample and mix** to a chosen rate and channel layout (cubic interpolation today; selectable algorithms are planned)
+- **Channel processing**: split, extract, mixdown, gain, normalize via `ProcessChannels`
+- **Encode** to mono 16-bit WAV today; other encoders plug in when they exist
+- **Registry**: extra containers and codecs register from outside this tree
+- **In-process Go**: no ffmpeg/sox; default build has no cgo
 
 ## Installation
 
@@ -889,11 +890,11 @@ More examples in the [documentation](https://pkg.go.dev/github.com/ik5/audpbx).
 
 ## Use Cases
 
-- **VoIP/Telephony**: Convert audio to 8kHz mono for G.711 codec
-- **Speech Recognition**: Prepare audio for ASR systems (typically 16kHz mono)
-- **Audio Streaming**: Convert various formats to a common format for streaming
-- **Podcast Processing**: Normalize audio files to consistent format
-- **Audio Analysis**: Preprocess audio for feature extraction and ML pipelines
+- **Telecom media and PBX**: Convert to and from rates and dialects a switch or media server will play (8 kHz / 16 kHz / 48 kHz, G.711, raw `.sln` / `.ulaw` / `.alaw`, and related formats). Asterisk, FreeSWITCH, WebRTC, and other telecom stacks are all in this set.
+- **Recordings in and out**: Decode a capture from a media server and encode it to something a person or another system can keep (WAV, raw PCM, G.711 — when an encoder exists).
+- **Join and split files**: Concatenate several recordings into one, or cut a longer recording into smaller ones (time range, markers, silence). Tooling only.
+- **Programmatically native audio manipulation**: Filtering, resampling, mixing, gain, and the rest of the pipeline as a Go library — not only for the telecom world.
+- **Ordinary audio conversion**: Any usual sample rate, both endians, basic PCM/containers — including work that is not a phone call. Speech recognition, podcasts, streaming, and ML preprocessing remain possible here; they are not headline use cases.
 
 ## Contributing
 
@@ -928,63 +929,18 @@ This project is licensed under the **Eclipse Public License 2.0** — see the [L
 ## Acknowledgments
 
 - Requires Go 1.25+ (uses range-over-int and `b.Loop()`)
-- Inspired by telephony and VoIP audio processing requirements
+- Inspired by telecommunication media and PBX audio processing requirements
 - Uses industry-standard audio libraries for format support
 
 ## Caveat
 
 This project is a vibe coding-based package created for the following reasons:
 
-1. Allows projects such as APIs to handle common audio formats and convert them to Open Source PBX-ready audio (such as [Asterisk PBX](https://www.asterisk.org/) and [FreeSWITCH](https://signalwire.com/freeswitch)).
+1. Lets a Go service manipulate audio in-process (no ffmpeg/sox), with first-class tooling for telecommunication media and PBX platforms such as [Asterisk](https://www.asterisk.org/) and [FreeSWITCH](https://signalwire.com/freeswitch).
 2. Native Go code first — see [Dependency policy](#dependency-policy-native-go-first) for the rule and when an external dependency is acceptable.
-3. Good documentation.
-4. Comprehensive unit testing.
-5. Zero-allocation code.
+3. Godoc for the API, with examples per API call by design.
+4. Unit tests and benchmarks for implementations.
+5. An attempt at zero-allocation code.
 6. Testing Claude Code for vibe coding.
 
-## TODO
-
-The following features are planned:
-
-* [ ] Integrate Opus support. Requires choosing an implementation — a pure-Go
-      decoder or a binding — and wrapping it; see [Scope](#scope).
-* [ ] Integrate AAC support as a binding, selected by build tags (static
-      linking, static building, dynamic library). This would be the first
-      dependency requiring cgo, so it sets the precedent for future bindings.
-* [ ] Additional audio test files for each format.
-* [ ] **Selectable resampling algorithm.** Allow the caller to choose the
-      resampling method rather than hard-coding cubic interpolation, trading
-      throughput against fidelity per use case:
-
-  | Method | Characteristics |
-  |--------|-----------------|
-  | Linear | Cheapest; adequate when the source is already band-limited or when latency dominates |
-  | Cubic (Catmull-Rom) | Current behaviour; good general-purpose default |
-  | Polyphase FIR | Highest fidelity; proper band-limiting for large decimation ratios |
-
-  Design notes for whoever picks this up:
-
-  - Cubic should remain the default so existing callers are unaffected. A
-    functional option on `NewResampler` (for example `WithInterpolator`) keeps
-    the current signature valid.
-  - The polyphase option also resolves the anti-aliasing shortfall described
-    under [Limitations](#limitations), which cannot be addressed by retuning
-    the existing one-pole filter. A polyphase FIR performs band-limiting and
-    rate conversion in a single operation, so it replaces both the cubic
-    interpolator and the one-pole filter rather than being layered on top of
-    them.
-  - Common telephony conversions are exact rational ratios (44.1 kHz to 8 kHz
-    is 441/80), so a polyphase implementation can precompute one coefficient
-    set per phase and evaluate only the output samples actually required.
-  - Selecting a method changes output samples. The bit-exact comparisons and
-    the quality measurements in
-    [examples/profile_resampler/PROFILING_GUIDE.md](examples/profile_resampler/PROFILING_GUIDE.md)
-    should be extended to cover each method independently.
-
-  This is a design placeholder only; implementation is deliberately out of
-  scope for the current branch.
-
-* [ ] Accept `WAVE_FORMAT_EXTENSIBLE` WAV files, and bit depths other than 16.
-* [ ] Evaluate faster MP3 and Ogg decoding. The throughput gap is inside the
-      upstream decoders rather than in audpbx, so the remedy is a different
-      dependency — not codec work in this project. See [Scope](#scope).
+Planned work is not listed here. Decisions live in [roadmap_v1.md](roadmap_v1.md); the full inventory is [current_gaps.md](current_gaps.md).

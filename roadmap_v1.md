@@ -1114,3 +1114,51 @@ memory.
 This document does not list what to *implement* in v1. It records what must be
 *decided* before the API can be frozen. Implementation planning follows from the
 decisions, not the reverse.
+
+---
+
+## Former README TODO
+
+The README no longer carries a TODO list. Those items were already in
+[current_gaps.md](current_gaps.md). Mapping:
+
+| Former README item | Inventory / decision |
+|---|---|
+| Opus | [FMT-4](current_gaps.md#fmt-4-telco-and-voip-codecs-absent-user-2), [FMT-14](current_gaps.md#fmt-14-opus-in-ogg-is-not-the-same-as-vorbis-in-ogg), [D11](#d11--cgo-lives-in-separate-modules-not-behind-build-tags) |
+| AAC in a separate module, registered | [FMT-5](current_gaps.md#fmt-5-aac-support-user-6), [D11](#d11--cgo-lives-in-separate-modules-not-behind-build-tags) |
+| Additional audio test files | [QA-7](current_gaps.md#qa-7-no-codec-reference-vectors) |
+| Selectable resampling algorithm | [DSP-2](current_gaps.md#dsp-2-no-resampler-algorithm-selection-user-4) — design notes below |
+| `WAVE_FORMAT_EXTENSIBLE` and bit depths other than 16 | [FMT-2](current_gaps.md#fmt-2-wav-decoding-is-narrow-user-5) |
+| Replace `go-mp3` with vendored minimp3 | [DEP-1](current_gaps.md#dep-1-five-of-seven-direct-dependencies-are-archived), [D9](#d9--per-dependency-strategy) |
+| Faster Ogg decoding | [DEP-1](current_gaps.md#dep-1-five-of-seven-direct-dependencies-are-archived) (Vorbis kept) |
+
+### DSP-2 design notes (moved from the README)
+
+Allow the caller to choose the resampling method rather than hard-coding cubic
+interpolation, trading throughput against fidelity per use case:
+
+| Method | Characteristics |
+|--------|-----------------|
+| Linear | Cheapest; adequate when the source is already band-limited or when latency dominates |
+| Cubic (Catmull-Rom) | Current behaviour; good general-purpose default |
+| Polyphase FIR | Highest fidelity; proper band-limiting for large decimation ratios |
+
+- Cubic should remain the default so existing callers are unaffected. A
+  functional option on `NewResampler` (for example `WithInterpolator`) keeps
+  the current signature valid.
+- The polyphase option also resolves the anti-aliasing shortfall in
+  [DSP-1](current_gaps.md#dsp-1-anti-aliasing-filter-is-structurally-inadequate)
+  and the README [Limitations](README.markdown#limitations). A polyphase FIR
+  performs band-limiting and rate conversion in a single operation, so it
+  replaces both the cubic interpolator and the one-pole filter rather than
+  being layered on top of them.
+- Common telephony conversions are exact rational ratios (44.1 kHz to 8 kHz
+  is 441/80), so a polyphase implementation can precompute one coefficient
+  set per phase and evaluate only the output samples actually required.
+- Selecting a method changes output samples. The bit-exact comparisons and
+  the quality measurements in
+  [examples/profile_resampler/PROFILING_GUIDE.md](examples/profile_resampler/PROFILING_GUIDE.md)
+  should be extended to cover each method independently.
+
+This is a design placeholder; implementation is not implied by recording it
+here.

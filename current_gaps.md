@@ -1608,7 +1608,9 @@ items here. The real pre-v1 question is the **default**: if polyphase should
 eventually become the default, changing it mid-v1 is a behavioural break, so the
 policy belongs in v1.
 
-Design notes are recorded in the README TODO. Two points worth repeating:
+Design notes are recorded in
+[roadmap_v1.md](roadmap_v1.md#dsp-2-design-notes-moved-from-the-readme).
+Two points worth repeating:
 polyphase replaces rather than layers on the cubic path, and common telephony
 ratios are exact rationals (44.1 kHz to 8 kHz is 441/80).
 
